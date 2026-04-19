@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OCR 3D 数据集生成器</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; background:#0b1020; color:#e9eefb; }
+    .panel { background:#141b34; border:1px solid #2a3561; border-radius:12px; padding:16px; margin-bottom:16px; }
+    input, button { padding:8px 10px; border-radius:8px; border:1px solid #3c4a80; background:#0f1530; color:#fff; }
+    button { cursor:pointer; background:#3f5efb; border:none; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px,1fr)); gap:12px; }
+    .card { background:#101731; border:1px solid #2b396d; border-radius:10px; padding:8px; }
+    .img-wrap { position:relative; width:100%; overflow:hidden; cursor:crosshair; }
+    .img-wrap img {
+      width:100%;
+      display:block;
+      border-radius:8px;
+      -webkit-user-drag:none;
+      user-select:none;
+    }
+    .poly-overlay { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    .poly-line { fill: rgba(20, 241, 149, 0.10); stroke:#14f195; stroke-width:2; }
+    .draw-box { position:absolute; border:2px dashed #ffc857; pointer-events:none; box-sizing:border-box; }
+    .hint { color:#95a4d4; font-size:13px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .status { white-space:pre-wrap; color:#aad4ff; font-size:13px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <h1>OCR 3D 空间变换数据集生成器</h1>
+
+  <div class="panel">
+    <h3>批量上传原始样本</h3>
+    <input type="file" id="files" multiple />
+    <label><input type="checkbox" id="useFilenameText" checked /> 文件名作为文本标签</label>
+    <input id="text" placeholder="默认文本标签（不使用文件名时）" />
+    <input id="classId" type="number" value="0" style="width:70px" />
+    <div class="toolbar">
+      <button onclick="batchUpload()">批量上传</button>
+      <button onclick="loadSamples()">刷新原始样本</button>
+    </div>
+    <div class="hint">上传后 sample_id 自动自增。可在下方逐张拉框后批量保存。</div>
+    <div id="uploadResult" class="status"></div>
+  </div>
+
+  <div class="panel">
+    <h3>批量拉框标注（原始样本）</h3>
+    <div class="toolbar">
+      <button onclick="saveAllBBoxes()">保存全部拉框</button>
+    </div>
+    <div class="hint">操作：按住鼠标左键拖拽即可画框，支持多图连续标注。</div>
+    <div class="grid" id="sampleGrid"></div>
+  </div>
+
+  <div class="panel">
+    <h3>批量增强</h3>
+    <input id="sampleIds" placeholder="sample_ids，例如 1,2,3" style="width:260px" />
+    <input id="count" type="number" value="6" style="width:90px" />
+    <button onclick="augment()">开始生成</button>
+    <button onclick="loadGenerated()">刷新列表</button>
+    <div id="jobResult" class="status"></div>
+  </div>
+
+  <div class="panel">
+    <h3>导出</h3>
+    <button onclick="exportYolo()">导出全部</button>
+    <button onclick="exportBoxed()">导出带框图片</button>
+    <div><a id="downloadLink" target="_blank" style="margin-left:10px;color:#7fd4ff"></a></div>
+    <div><a id="downloadBoxedLink" target="_blank" style="margin-left:10px;color:#7fd4ff"></a></div>
+  </div>
+
+  <div class="panel">
+    <h3>生成结果（带框可视化）</h3>
+    <div class="grid" id="grid"></div>
+  </div>
+
+  <script>
+    const sampleBBoxCache = new Map();
+
+    async function batchUpload() {
+      const fd = new FormData();
+      const files = document.getElementById('files').files;
+      if (!files || files.length === 0) return alert('请选择至少一张图片');
+      for (const file of files) {
+        fd.append('files', file);
+      }
+      fd.append('class_id', document.getElementById('classId').value || '0');
+      fd.append('use_filename_as_text', document.getElementById('useFilenameText').checked ? 'true' : 'false');
+      fd.append('default_text', document.getElementById('text').value || 'text');
+
+      const resp = await fetch('/api/v1/samples/batch-upload', { method: 'POST', body: fd });
+      const data = await resp.json();
+      document.getElementById('uploadResult').innerText = JSON.stringify(data, null, 2);
+      await loadSamples();
+    }
+
+    function mountDrawBehavior(imgWrap, sampleId, initBox) {
+      let isDrawing = false;
+      let startX = 0;
+      let startY = 0;
+      const draw = imgWrap.querySelector('.draw-box');
+
+      const applyBox = (x, y, w, h) => {
+        draw.style.left = `${x}px`;
+        draw.style.top = `${y}px`;
+        draw.style.width = `${w}px`;
+        draw.style.height = `${h}px`;
+      };
+
+      applyBox(initBox.x, initBox.y, initBox.w, initBox.h);
+      sampleBBoxCache.set(sampleId, { ...initBox });
+
+      imgWrap.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const rect = imgWrap.getBoundingClientRect();
+        isDrawing = true;
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+      });
+
+      window.addEventListener('mouseup', () => {
+        isDrawing = false;
+      });
+
+      imgWrap.addEventListener('mousemove', (e) => {
+        if (!isDrawing) return;
+        const rect = imgWrap.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const left = Math.max(0, Math.min(startX, x));
+        const top = Math.max(0, Math.min(startY, y));
+        const width = Math.max(1, Math.abs(x - startX));
+        const height = Math.max(1, Math.abs(y - startY));
+        applyBox(left, top, width, height);
+        sampleBBoxCache.set(sampleId, { x: left, y: top, w: width, h: height });
+      });
+    }
+
+    async function loadSamples() {
+      const resp = await fetch('/api/v1/samples?limit=200');
+      const list = await resp.json();
+      const grid = document.getElementById('sampleGrid');
+      grid.innerHTML = '';
+      sampleBBoxCache.clear();
+
+      list.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="img-wrap" id="wrap-${item.sample_id}">
+            <img src="${item.image_url}" draggable="false" />
+            <div class="draw-box"></div>
+          </div>
+          <div style="font-size:12px;margin-top:6px">sample_id=${item.sample_id} | text=<input value="${item.text}" id="text-${item.sample_id}" style="width:110px"></div>
+        `;
+        grid.appendChild(card);
+
+        const wrap = card.querySelector(`#wrap-${item.sample_id}`);
+        const img = wrap.querySelector('img');
+        img.addEventListener('dragstart', (e) => e.preventDefault());
+
+        const initFromStored = () => {
+          const sx = img.naturalWidth > 0 ? (img.clientWidth / img.naturalWidth) : 1;
+          const sy = img.naturalHeight > 0 ? (img.clientHeight / img.naturalHeight) : 1;
+          const initBox = {
+            x: Number(item.bbox_x || 0) * sx,
+            y: Number(item.bbox_y || 0) * sy,
+            w: Math.max(1, Number(item.bbox_w || 1) * sx),
+            h: Math.max(1, Number(item.bbox_h || 1) * sy),
+          };
+          mountDrawBehavior(wrap, item.sample_id, initBox);
+        };
+
+        if (img.complete && img.naturalWidth > 0) {
+          initFromStored();
+        } else {
+          img.addEventListener('load', initFromStored, { once: true });
+        }
+      });
+    }
+
+    async function saveAllBBoxes() {
+      const items = [];
+      sampleBBoxCache.forEach((box, sampleId) => {
+        const textInput = document.getElementById(`text-${sampleId}`);
+        const wrap = document.getElementById(`wrap-${sampleId}`);
+        const img = wrap ? wrap.querySelector('img') : null;
+        const sx = img && img.clientWidth > 0 ? (img.naturalWidth / img.clientWidth) : 1;
+        const sy = img && img.clientHeight > 0 ? (img.naturalHeight / img.clientHeight) : 1;
+        items.push({
+          sample_id: sampleId,
+          bbox_x: box.x * sx,
+          bbox_y: box.y * sy,
+          bbox_w: box.w * sx,
+          bbox_h: box.h * sy,
+          text: textInput ? textInput.value : undefined,
+        });
+      });
+      const resp = await fetch('/api/v1/samples/batch-bbox', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+      const data = await resp.json();
+      alert(`已保存 ${data.updated} 条框标注`);
+    }
+
+    async function augment() {
+      const ids = document.getElementById('sampleIds').value.split(',').map(s => parseInt(s.trim(), 10)).filter(Boolean);
+      const count = parseInt(document.getElementById('count').value || '6', 10);
+      const body = {
+        sample_ids: ids,
+        count_per_sample: count,
+        pitch_range: [-25, 25],
+        yaw_range: [-25, 25],
+        roll_range: [-15, 15],
+        tx_range: [-15, 15],
+        ty_range: [-15, 15],
+        tz_range: [-20, 20],
+        scale_range: [0.9, 1.1],
+        focal_range: [700, 1100]
+      };
+      const resp = await fetch('/api/v1/augment/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json();
+      document.getElementById('jobResult').innerText = JSON.stringify(data, null, 2);
+      await loadGenerated();
+    }
+
+    async function exportYolo() {
+      const resp = await fetch('/api/v1/export/yolo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved_only: false })
+      });
+      const data = await resp.json();
+      const link = document.getElementById('downloadLink');
+      link.href = data.download_url;
+      link.innerText = '下载 YOLO 导出文件';
+    }
+
+    async function exportBoxed() {
+      const resp = await fetch('/api/v1/export/boxed-images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved_only: false })
+      });
+      const data = await resp.json();
+      const link = document.getElementById('downloadBoxedLink');
+      link.href = data.download_url;
+      link.innerText = '下载带框图片导出文件';
+    }
+
+    async function loadGenerated() {
+      const resp = await fetch('/api/v1/generated?limit=60');
+      const list = await resp.json();
+      const grid = document.getElementById('grid');
+      grid.innerHTML = '';
+
+      list.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <div class="img-wrap">
+            <img src="${item.image_url}" draggable="false" />
+            <svg class="poly-overlay" preserveAspectRatio="none"><polygon class="poly-line"/></svg>
+          </div>
+          <div style="font-size:12px;margin-top:6px">id=${item.id} | yaw=${item.yaw.toFixed(1)} | pitch=${item.pitch.toFixed(1)} | roll=${item.roll.toFixed(1)}</div>
+        `;
+        grid.appendChild(card);
+
+        const img = card.querySelector('img');
+        const svg = card.querySelector('.poly-overlay');
+        const poly = card.querySelector('.poly-line');
+        const applyPoly = () => {
+          const w = img.naturalWidth || 1;
+          const h = img.naturalHeight || 1;
+          svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+          let pts = item.quad_norm;
+          if (!pts || pts.length !== 4) {
+            // fallback old rectangle records
+            const x1 = item.bbox_x;
+            const y1 = item.bbox_y;
+            const x2 = item.bbox_x + item.bbox_w;
+            const y2 = item.bbox_y + item.bbox_h;
+            pts = [[x1 / w, y1 / h], [x2 / w, y1 / h], [x2 / w, y2 / h], [x1 / w, y2 / h]];
+          }
+
+          const points = pts
+            .map(p => `${(p[0] * w).toFixed(2)},${(p[1] * h).toFixed(2)}`)
+            .join(' ');
+          poly.setAttribute('points', points);
+        };
+        if (img.complete) applyPoly();
+        img.addEventListener('load', applyPoly);
+      });
+    }
+
+    loadSamples();
+    loadGenerated();
+  </script>
+</body>
+</html>
