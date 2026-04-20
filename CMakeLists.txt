@@ -7,5 +7,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-add_executable(myapp src/main.cpp)
+add_executable(myapp src/main.cpp src/tracker.cpp)
 target_link_libraries(myapp ${OpenCV_LIBS})
