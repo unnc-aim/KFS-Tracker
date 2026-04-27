@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, Sequence
-
 import torch
 import torch.nn as nn
+from torchvision.models import efficientnet_b3
+
+
 
 
 class TrackerModel(nn.Module):
@@ -12,32 +14,18 @@ class TrackerModel(nn.Module):
 
     def __init__(
         self,
-        input_channels: int = 3,
-        num_outputs: int = 8,
-        feature_dims: Sequence[int] = (16, 32, 64),
+        num_outputs: int = 4,
+        hidden_size:int=512
     ) -> None:
         super().__init__()
 
-        layers: list[nn.Module] = []
-        in_channels = input_channels
-        for out_channels in feature_dims:
-            layers.extend(
-                [
-                    nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-                    nn.BatchNorm2d(out_channels),
-                    nn.ReLU(inplace=True),
-                    nn.MaxPool2d(kernel_size=2, stride=2),
-                ]
-            )
-            in_channels = out_channels
-
-        self.backbone = nn.Sequential(*layers)
+        self.backbone = efficientnet_b3()
+        self.backbone.classifier=nn.Linear(1536,hidden_size)
         self.head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(in_channels, 128),
+
+            nn.Linear(hidden_size, hidden_size//2),
             nn.ReLU(inplace=True),
-            nn.Linear(128, num_outputs),
+            nn.Linear(hidden_size//2, num_outputs),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -46,14 +34,12 @@ class TrackerModel(nn.Module):
 
 
 def build_tracker_model(
-    input_channels: int = 3,
-    num_outputs: int = 8,
-    feature_dims: Iterable[int] = (16, 32, 64),
+    num_outputs: int = 4,
+    hidden_size: int=512
 ) -> TrackerModel:
     return TrackerModel(
-        input_channels=input_channels,
         num_outputs=num_outputs,
-        feature_dims=tuple(feature_dims),
+        hidden_size=hidden_size
     )
 
 
