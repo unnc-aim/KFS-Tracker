@@ -3,6 +3,7 @@
 #include <opencv2/opencv.hpp>
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -10,17 +11,17 @@ namespace tracker {
 
 struct PoseEstimationResult {
     bool found = false;
-    std::array<cv::Point2f, 4> faceCorners{};
+    std::array<cv::Point2f, 6> hexagonCorners{};
     std::vector<cv::Point2f> imageCorners2d;
     std::vector<cv::Point3f> objectCorners3d;
     std::vector<cv::Point3f> cameraCorners3d;
-    cv::Mat warpedFace;
+    std::vector<cv::Point2f> projectedCubeCorners2d;
+    cv::Mat mask;
+    cv::Mat annotated;
     cv::Vec3d rvec;
     cv::Vec3d tvec;
     cv::Mat rotationMatrix;
     double reprojectionError = -1.0;
-    cv::Mat mask;
-    cv::Mat annotated;
 };
 
 class TrackerInterface {
@@ -41,26 +42,55 @@ public:
     PoseEstimationResult detect(const cv::Mat& input, const std::string& color) const override;
 
 private:
-    cv::Mat buildColorMask(const cv::Mat& hsv, const std::string& color) const;
-    std::array<cv::Point2f, 4> extractVisibleFace(const cv::Mat& mask) const;
-    static std::array<cv::Point2f, 4> orderCorners(const std::vector<cv::Point>& pts);
-    static bool isRectangleLike(const std::array<cv::Point2f, 4>& corners);
-    cv::Mat warpFaceToSquare(const cv::Mat& input, const std::array<cv::Point2f, 4>& corners) const;
+    struct HexagonCandidate {
+        bool valid = false;
+        double area = 0.0;
+        std::vector<cv::Point> contour;
+        std::array<cv::Point2f, 6> corners{};
+    };
 
-    std::vector<cv::Point3f> buildFrontFaceObjectPoints() const;
+    struct EdgeInfo {
+        int startIndex = 0;
+        int endIndex = 0;
+        int cluster = -1;
+        float length = 0.0f;
+        float angle = 0.0f;
+        cv::Point2f direction;
+        cv::Vec3f line;
+    };
+
+    struct PoseCandidate {
+        bool valid = false;
+        std::array<cv::Point2f, 6> imageCorners{};
+        std::vector<cv::Point3f> objectCorners;
+        std::vector<cv::Point2f> projectedCorners;
+        cv::Vec3d rvec;
+        cv::Vec3d tvec;
+        double reprojectionError = std::numeric_limits<double>::infinity();
+        double totalScore = std::numeric_limits<double>::infinity();
+    };
+
+    cv::Mat buildColorMask(const cv::Mat& input, const std::string& color) const;
+    static cv::Mat applyClaheToValueChannel(const cv::Mat& input);
+    static void fillMaskHoles(cv::Mat& mask);
+    HexagonCandidate extractLargestHexagon(const cv::Mat& mask) const;
+    static std::array<cv::Point2f, 6> orderPolygonCorners(const std::vector<cv::Point2f>& points);
+    static std::vector<EdgeInfo> buildEdgeInfos(const std::array<cv::Point2f, 6>& corners);
+    static bool clusterEdges(std::vector<EdgeInfo>& edges);
+    static std::vector<cv::Point2f> estimateVanishingPoints(const std::vector<EdgeInfo>& edges);
+    static std::array<cv::Point2f, 6> rotateCorners(const std::array<cv::Point2f, 6>& corners, int offset, bool reverse);
     std::vector<cv::Point3f> buildCubeObjectPoints() const;
+    PoseCandidate solvePoseFromHexagon(const std::array<cv::Point2f, 6>& corners) const;
     std::vector<cv::Point3f> transformToCameraCoordinates(const std::vector<cv::Point3f>& objectPoints,
                                                           const cv::Mat& rotationMatrix,
                                                           const cv::Vec3d& tvec) const;
-    std::vector<cv::Point2f> computeVisibleHullPoints(const std::vector<cv::Point2f>& projectedPoints,
-                                                      const std::vector<cv::Point3f>& objectPoints,
-                                                      std::vector<cv::Point3f>* visibleObjectPoints) const;
     double computeReprojectionError(const std::vector<cv::Point3f>& objectPoints,
                                     const std::vector<cv::Point2f>& imagePoints,
                                     const cv::Vec3d& rvec,
                                     const cv::Vec3d& tvec) const;
     cv::Mat drawAnnotation(const cv::Mat& input,
-                           const std::array<cv::Point2f, 4>& faceCorners,
+                           const std::vector<cv::Point>& contour,
+                           const std::array<cv::Point2f, 6>& hexagonCorners,
                            const std::vector<cv::Point2f>& projectedCorners,
                            const cv::Vec3d& rvec,
                            const cv::Vec3d& tvec,
