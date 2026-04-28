@@ -99,31 +99,48 @@ def extract_targets(batch_target: dict[str, object], device: torch.device) -> to
     if not isinstance(bbox, torch.Tensor):
         bbox = torch.as_tensor(bbox, dtype=torch.float32)
     return bbox.to(device=device, dtype=torch.float32)
-
+def extract_class(batch_target: dict[str, object], device: torch.device) -> torch.Tensor:
+    class_id=batch_target["class_id"]
+    if not isinstance(class_id, torch.Tensor):
+        class_id = torch.as_tensor(class_id, dtype=torch.long)
+    return class_id.to(device,dtype=torch.long)
 
 @torch.no_grad()
-def evaluate(model: nn.Module, data_loader: DataLoader, criterion: nn.Module, device: torch.device) -> float:
+def evaluate(
+    model: nn.Module,
+    data_loader: DataLoader,
+    bbox_criterion: nn.Module,
+    classification_criterion: nn.Module,
+    device: torch.device,
+) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
     total_count = 0
+    total_correct = 0
 
     for batch in tqdm(data_loader, desc="val", leave=False):
         images = batch["image"].to(device)
         targets = extract_targets(batch["target"], device)
-        preds = model(images)
-        loss = criterion(preds, targets)
+        class_id = extract_class(batch["target"], device)
+        preds, class_id_pred = model(images)
+        loss = bbox_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
+        pred_class = class_id_pred.argmax(dim=1)
 
         batch_size = images.size(0)
         total_loss += float(loss.item()) * batch_size
+        total_correct += int((pred_class == class_id).sum().item())
         total_count += batch_size
 
-    return total_loss / max(total_count, 1)
+    avg_loss = total_loss / max(total_count, 1)
+    avg_acc = total_correct / max(total_count, 1)
+    return avg_loss, avg_acc
 
 
 def train_one_epoch(
     model: nn.Module,
     data_loader: DataLoader,
-    criterion: nn.Module,
+    bbox_criterion: nn.Module,
+    classification_criterion:nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> float:
@@ -134,10 +151,11 @@ def train_one_epoch(
     for batch in tqdm(data_loader, desc="train", leave=False):
         images = batch["image"].to(device)
         targets = extract_targets(batch["target"], device)
+        class_id=extract_class(batch["target"],device)
 
         optimizer.zero_grad(set_to_none=True)
-        preds = model(images)
-        loss = criterion(preds, targets)
+        preds,class_id_pred= model(images)
+        loss = bbox_criterion(preds, targets)+classification_criterion(class_id_pred,class_id)
         loss.backward()
         optimizer.step()
 
@@ -191,7 +209,8 @@ def train(cfg: TrainConfig) -> None:
     train_loader, val_loader, total_size = build_dataloaders(cfg)
 
     model = build_tracker_model(num_outputs=4, hidden_size=cfg.hidden_size).to(device)
-    criterion = nn.SmoothL1Loss()
+    bbox_criterion = nn.SmoothL1Loss()
+    classification_criterion=nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     start_epoch = 0
@@ -213,10 +232,10 @@ def train(cfg: TrainConfig) -> None:
     )
 
     for epoch in range(start_epoch, cfg.epochs):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss = evaluate(model, val_loader, criterion, device)
+        train_loss = train_one_epoch(model, train_loader, bbox_criterion,classification_criterion, optimizer, device)
+        val_loss, val_acc = evaluate(model, val_loader, bbox_criterion, classification_criterion, device)
 
-        print(f"[Epoch {epoch + 1}/{cfg.epochs}] train_loss={train_loss:.6f} val_loss={val_loss:.6f}")
+        print(f"[Epoch {epoch + 1}/{cfg.epochs}] train_loss={train_loss:.6f} val_loss={val_loss:.6f} val_acc={val_acc:.4f}")
 
         save_checkpoint(model, optimizer, epoch, best_val, last_ckpt)
         if val_loss < best_val:

@@ -10,8 +10,8 @@ from torch.utils.data import Dataset
 
 
 VALID_LABEL_NAMES: tuple[str, ...] = (
-    "B_R1",
     "R_R1",
+    "B_R1",
     "T_03",
     "T_04",
     "T_05",
@@ -137,7 +137,7 @@ class KFSTrackerLocalizationDataset(Dataset[dict[str, object]]):
                             label_path=label_path,
                             label_name=label_name,
                             school_name=school_name,
-                            class_id=class_id,
+                            class_id=VALID_LABEL_NAMES.index(label_name),
                             bbox_xyxy_norm=xyxy_norm,
                             corners_xy_norm=corners_xy,
                         )

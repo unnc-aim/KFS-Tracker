@@ -15,7 +15,8 @@ class TrackerModel(nn.Module):
     def __init__(
         self,
         num_outputs: int = 4,
-        hidden_size:int=512
+        hidden_size:int=512,
+        class_num=32
     ) -> None:
         super().__init__()
 
@@ -27,10 +28,15 @@ class TrackerModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size//2, num_outputs),
         )
+        self.classifier=nn.Sequential(
+            nn.Linear(hidden_size,hidden_size//2),
+            nn.ReLU(),
+            nn.Linear(hidden_size//2,class_num)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)
-        return self.head(x)
+        return self.head(x),self.classifier(x)
 
 
 def build_tracker_model(
