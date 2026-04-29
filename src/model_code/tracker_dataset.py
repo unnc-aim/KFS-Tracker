@@ -268,7 +268,7 @@ class KFSTrackerLocalizationDataset(Dataset[dict[str, object]]):
         }
 
 
-def build_kfs_localization_dataset(
+def build_dataset(
     root: str | Path = "data/coworkers_for_KFS/labeled",
     transform: Callable[[Image.Image], object] | None = None,
     target_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,

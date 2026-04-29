@@ -15,8 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model_code.tracker_dataset import build_dataset
-# from model_code.corner_point_dataset import build_dataset
+from model_code.corner_point_dataset import build_dataset
 from model_code.tracker_model import build_tracker_model, export_libtorch_script
 
 
@@ -24,7 +23,7 @@ from model_code.tracker_model import build_tracker_model, export_libtorch_script
 class TrainConfig:
     dataset_root: str = "data/coworkers_for_KFS/labeled"
     output_dir: str = "model"
-    model_name: str = "tracker_localizer"
+    model_name: str = "corner_point_localizer"
     epochs: int = 20
     batch_size: int = 30
     lr: float = 1e-3
@@ -81,7 +80,7 @@ def build_dataloaders(cfg: TrainConfig) -> tuple[DataLoader, DataLoader, int]:
         shuffle=True,
         num_workers=cfg.num_workers,
         pin_memory=torch.cuda.is_available(),
-        drop_last=True
+        drop_last=True,
     )
     val_loader = DataLoader(
         val_set,
@@ -89,28 +88,30 @@ def build_dataloaders(cfg: TrainConfig) -> tuple[DataLoader, DataLoader, int]:
         shuffle=False,
         num_workers=cfg.num_workers,
         pin_memory=torch.cuda.is_available(),
-        drop_last=True
+        drop_last=True,
     )
     return train_loader, val_loader, total_size
 
 
 def extract_targets(batch_target: dict[str, object], device: torch.device) -> torch.Tensor:
-    # Regression target uses normalized bbox [x1, y1, x2, y2]
-    bbox = batch_target["bbox_xyxy_norm"]
-    if not isinstance(bbox, torch.Tensor):
-        bbox = torch.as_tensor(bbox, dtype=torch.float32)
-    return bbox.to(device=device, dtype=torch.float32)
+    corners = batch_target["corners_xy_norm"]
+    if not isinstance(corners, torch.Tensor):
+        corners = torch.as_tensor(corners, dtype=torch.float32)
+    return corners.to(device=device, dtype=torch.float32)
+
+
 def extract_class(batch_target: dict[str, object], device: torch.device) -> torch.Tensor:
-    class_id=batch_target["class_id"]
+    class_id = batch_target["class_id"]
     if not isinstance(class_id, torch.Tensor):
         class_id = torch.as_tensor(class_id, dtype=torch.long)
-    return class_id.to(device,dtype=torch.long)
+    return class_id.to(device=device, dtype=torch.long)
+
 
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
     data_loader: DataLoader,
-    bbox_criterion: nn.Module,
+    point_criterion: nn.Module,
     classification_criterion: nn.Module,
     device: torch.device,
 ) -> tuple[float, float]:
@@ -124,7 +125,7 @@ def evaluate(
         targets = extract_targets(batch["target"], device)
         class_id = extract_class(batch["target"], device)
         preds, class_id_pred = model(images)
-        loss = bbox_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
+        loss = point_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
         pred_class = class_id_pred.argmax(dim=1)
 
         batch_size = images.size(0)
@@ -140,8 +141,8 @@ def evaluate(
 def train_one_epoch(
     model: nn.Module,
     data_loader: DataLoader,
-    bbox_criterion: nn.Module,
-    classification_criterion:nn.Module,
+    point_criterion: nn.Module,
+    classification_criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> float:
@@ -152,11 +153,11 @@ def train_one_epoch(
     for batch in tqdm(data_loader, desc="train", leave=False):
         images = batch["image"].to(device)
         targets = extract_targets(batch["target"], device)
-        class_id=extract_class(batch["target"],device)
+        class_id = extract_class(batch["target"], device)
 
         optimizer.zero_grad(set_to_none=True)
-        preds,class_id_pred= model(images)
-        loss = bbox_criterion(preds, targets)+classification_criterion(class_id_pred,class_id)
+        preds, class_id_pred = model(images)
+        loss = point_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
         loss.backward()
         optimizer.step()
 
@@ -209,9 +210,9 @@ def train(cfg: TrainConfig) -> None:
 
     train_loader, val_loader, total_size = build_dataloaders(cfg)
 
-    model = build_tracker_model(num_outputs=4, hidden_size=cfg.hidden_size).to(device)
-    bbox_criterion = nn.SmoothL1Loss()
-    classification_criterion=nn.CrossEntropyLoss()
+    model = build_tracker_model(num_outputs=8, hidden_size=cfg.hidden_size).to(device)
+    point_criterion = nn.SmoothL1Loss()
+    classification_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     start_epoch = 0
@@ -233,8 +234,21 @@ def train(cfg: TrainConfig) -> None:
     )
 
     for epoch in range(start_epoch, cfg.epochs):
-        train_loss = train_one_epoch(model, train_loader, bbox_criterion,classification_criterion, optimizer, device)
-        val_loss, val_acc = evaluate(model, val_loader, bbox_criterion, classification_criterion, device)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            point_criterion,
+            classification_criterion,
+            optimizer,
+            device,
+        )
+        val_loss, val_acc = evaluate(
+            model,
+            val_loader,
+            point_criterion,
+            classification_criterion,
+            device,
+        )
 
         print(f"[Epoch {epoch + 1}/{cfg.epochs}] train_loss={train_loss:.6f} val_loss={val_loss:.6f} val_acc={val_acc:.4f}")
 
@@ -244,7 +258,6 @@ def train(cfg: TrainConfig) -> None:
             save_checkpoint(model, optimizer, epoch, best_val, best_ckpt)
             print(f"  New best checkpoint saved: {best_ckpt}")
 
-    # Export best checkpoint to TorchScript for C++/libtorch
     script_path = output_dir / f"{cfg.model_name}.pt"
     export_libtorch_script(
         output_path=script_path,
@@ -257,7 +270,7 @@ def train(cfg: TrainConfig) -> None:
 
 
 def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Train KFS tracker localization model.")
+    parser = argparse.ArgumentParser(description="Train KFS corner-point localization model.")
     parser.add_argument("--dataset-root", type=str, default=TrainConfig.dataset_root)
     parser.add_argument("--output-dir", type=str, default=TrainConfig.output_dir)
     parser.add_argument("--model-name", type=str, default=TrainConfig.model_name)

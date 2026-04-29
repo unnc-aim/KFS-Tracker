@@ -13,6 +13,11 @@ find_package(Torch REQUIRED)
 find_package(OpenCV REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
-add_executable(myapp src/main.cpp src/tracker.cpp src/bbox_tracking_classify.cpp)
+add_executable(myapp
+    src/main.cpp
+    src/tracker.cpp
+    src/2D_tracker.cpp
+    src/bbox_tracking_classify.cpp
+)
 target_link_libraries(myapp ${OpenCV_LIBS} ${TORCH_LIBRARIES})
 target_compile_definitions(myapp PRIVATE -D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
