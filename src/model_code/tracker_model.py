@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 import torch
 import torch.nn as nn
-from torchvision.models import efficientnet_b3
+from torchvision.models import efficientnet_b3,efficientnet_b0
 
 
 
@@ -20,8 +20,10 @@ class TrackerModel(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.backbone = efficientnet_b3()
-        self.backbone.classifier=nn.Linear(1536,hidden_size)
+        self.tracker_backbone = efficientnet_b3()
+        self.classifier_backbone=efficientnet_b0()
+        self.tracker_backbone.classifier=nn.Linear(1536,hidden_size)
+        self.classifier_backbone.classifier=nn.Linear(1280,hidden_size)
         self.head = nn.Sequential(
 
             nn.Linear(hidden_size, hidden_size//2),
@@ -35,8 +37,9 @@ class TrackerModel(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.backbone(x)
-        return self.head(x),self.classifier(x)
+        tracker_x = self.tracker_backbone(x)
+        classifier_x=self.classifier_backbone(x)
+        return self.head(tracker_x),self.classifier(classifier_x)
 
 
 def build_tracker_model(

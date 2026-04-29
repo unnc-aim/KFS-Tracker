@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 
 from PIL import Image
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -15,7 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model_code.corner_point_dataset import build_dataset
+from model_code.corner_point_dataset import build_dataset, detect_colored_quad_corners
+from model_code.tracker_dataset import VALID_LABEL_NAMES
 from model_code.tracker_model import build_tracker_model, export_libtorch_script
 
 
@@ -25,7 +28,7 @@ class TrainConfig:
     output_dir: str = "model"
     model_name: str = "corner_point_localizer"
     epochs: int = 20
-    batch_size: int = 30
+    batch_size: int = 20
     lr: float = 1e-3
     weight_decay: float = 1e-4
     val_ratio: float = 0.1
@@ -125,7 +128,7 @@ def evaluate(
         targets = extract_targets(batch["target"], device)
         class_id = extract_class(batch["target"], device)
         preds, class_id_pred = model(images)
-        loss = point_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
+        loss = point_criterion(preds, targets)
         pred_class = class_id_pred.argmax(dim=1)
 
         batch_size = images.size(0)
@@ -135,6 +138,8 @@ def evaluate(
 
     avg_loss = total_loss / max(total_count, 1)
     avg_acc = total_correct / max(total_count, 1)
+    
+    # traditional_visualization("data/coworkers_for_KFS/labeled/F_25/WTR/frame_F_25_0009.jpg")
     return avg_loss, avg_acc
 
 
@@ -149,6 +154,9 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
     total_count = 0
+    running_point_loss = 0.0
+    running_cls_loss = 0.0
+    running_steps = 0
 
     for batch in tqdm(data_loader, desc="train", leave=False):
         images = batch["image"].to(device)
@@ -157,7 +165,20 @@ def train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         preds, class_id_pred = model(images)
-        loss = point_criterion(preds, targets) + classification_criterion(class_id_pred, class_id)
+        point_loss = point_criterion(preds, targets)
+        cls_loss = classification_criterion(class_id_pred, class_id)
+
+        # running_point_loss += float(point_loss.item())
+        # running_cls_loss += float(cls_loss.item())
+        # running_steps += 1
+
+        # avg_point_loss = running_point_loss / max(running_steps, 1)
+        # avg_cls_loss = running_cls_loss / max(running_steps, 1)
+        # point_weight = 1.0 / max(avg_point_loss, 1e-6)
+        # cls_weight = 1.0 / max(avg_cls_loss, 1e-6)
+
+        # loss = point_weight * point_loss + cls_weight * cls_loss
+        loss=point_loss+cls_loss
         loss.backward()
         optimizer.step()
 
@@ -202,6 +223,129 @@ def load_checkpoint(
     return start_epoch, best_val
 
 
+@torch.no_grad()
+def visualization(
+    image_path: str | Path,
+    output_path: str | Path = "corner_point_vis.jpg",
+    checkpoint_path: str | Path = "model/corner_point_localizer_best.pth",
+    image_size: int = 300,
+    hidden_size: int = 512,
+    device: str | torch.device | None = None,
+) -> Path:
+    device_obj = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
+    model = build_tracker_model(num_outputs=8, hidden_size=hidden_size).to(device_obj)
+
+    ckpt = torch.load(Path(checkpoint_path), map_location=device_obj)
+    state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    image_path = Path(image_path)
+    output_path = Path(output_path)
+    image_bgr = cv2.imread(str(image_path))
+    if image_bgr is None or image_bgr.size == 0:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    image_pil = Image.fromarray(image_rgb)
+    transform = build_image_transform(image_size)
+    image_tensor = transform(image_pil).unsqueeze(0).to(device_obj)
+
+    corners_pred, class_logits = model(image_tensor)
+    corners_pred = corners_pred.squeeze(0).detach().cpu().float().clamp(0.0, 1.0)
+    class_probs = torch.softmax(class_logits.squeeze(0).detach().cpu(), dim=0)
+    class_id = int(class_probs.argmax().item())
+    class_score = float(class_probs[class_id].item())
+    class_name = VALID_LABEL_NAMES[class_id] if 0 <= class_id < len(VALID_LABEL_NAMES) else str(class_id)
+
+    height, width = image_bgr.shape[:2]
+    points: list[tuple[int, int]] = []
+    for i in range(4):
+        x_norm = float(corners_pred[2 * i].item())
+        y_norm = float(corners_pred[2 * i + 1].item())
+        x = max(0, min(int(round(x_norm * width)), width - 1))
+        y = max(0, min(int(round(y_norm * height)), height - 1))
+        points.append((x, y))
+
+    annotated = image_bgr.copy()
+    for i, pt in enumerate(points):
+        cv2.circle(annotated, pt, 5, (0, 255, 255), -1)
+        cv2.putText(
+            annotated,
+            str(i),
+            (pt[0] + 6, pt[1] - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+    polygon = np.asarray(points, dtype=np.int32).reshape(-1, 1, 2)
+    cv2.polylines(annotated, [polygon], True, (0, 255, 0), 2)
+    cv2.putText(
+        annotated,
+        f"class: {class_name} (id={class_id}, p={class_score:.3f})",
+        (14, 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (50, 220, 50),
+        2,
+        cv2.LINE_AA,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), annotated)
+    return output_path
+
+
+def traditional_visualization(
+    image_path: str | Path,
+    output_path: str | Path = "corner_point_traditional_vis.jpg",
+    color: str | None = None,
+) -> Path:
+    image_path = Path(image_path)
+    output_path = Path(output_path)
+
+    image_bgr = cv2.imread(str(image_path))
+    if image_bgr is None or image_bgr.size == 0:
+        raise FileNotFoundError(f"Could not read image: {image_path}")
+
+    found, corners_xy_norm = detect_colored_quad_corners(image_bgr, color)
+    annotated = image_bgr.copy()
+
+    if found and corners_xy_norm is not None and len(corners_xy_norm) >= 8:
+        height, width = image_bgr.shape[:2]
+        points: list[tuple[int, int]] = []
+        for i in range(4):
+            x_norm = float(corners_xy_norm[2 * i])
+            y_norm = float(corners_xy_norm[2 * i + 1])
+            x = max(0, min(int(round(x_norm * width)), width - 1))
+            y = max(0, min(int(round(y_norm * height)), height - 1))
+            points.append((x, y))
+
+        polygon = np.asarray(points, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(annotated, [polygon], True, (0, 255, 0), 2)
+        for i, pt in enumerate(points):
+            cv2.circle(annotated, pt, 5, (0, 255, 255), -1)
+            cv2.putText(
+                annotated,
+                str(i),
+                (pt[0] + 6, pt[1] - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        cv2.putText(annotated, "traditional detect: true", (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (50, 220, 50), 2, cv2.LINE_AA)
+    else:
+        cv2.putText(annotated, "traditional detect: false", (14, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 100, 255), 2, cv2.LINE_AA)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), annotated)
+    return output_path
+
+
 def train(cfg: TrainConfig) -> None:
     set_seed(cfg.seed)
     device = torch.device(cfg.device)
@@ -217,6 +361,7 @@ def train(cfg: TrainConfig) -> None:
 
     start_epoch = 0
     best_val = float("inf")
+    best_acc=0
     if cfg.load_checkpoint:
         ckpt_path = Path(cfg.load_checkpoint)
         if ckpt_path.exists():
@@ -253,10 +398,12 @@ def train(cfg: TrainConfig) -> None:
         print(f"[Epoch {epoch + 1}/{cfg.epochs}] train_loss={train_loss:.6f} val_loss={val_loss:.6f} val_acc={val_acc:.4f}")
 
         save_checkpoint(model, optimizer, epoch, best_val, last_ckpt)
-        if val_loss < best_val:
+        if val_loss <= best_val and val_acc>=best_acc:
             best_val = val_loss
+            best_acc=val_acc
             save_checkpoint(model, optimizer, epoch, best_val, best_ckpt)
             print(f"  New best checkpoint saved: {best_ckpt}")
+            visualization("data/coworkers_for_KFS/labeled/F_25/WTR/frame_F_25_0009.jpg")
 
     script_path = output_dir / f"{cfg.model_name}.pt"
     export_libtorch_script(
@@ -308,3 +455,4 @@ def parse_args() -> TrainConfig:
 if __name__ == "__main__":
     config = parse_args()
     train(config)
+    

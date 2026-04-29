@@ -21,6 +21,26 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _letterbox_to_square(image_bgr: np.ndarray, image_size: int) -> np.ndarray:
+    if image_size <= 0:
+        return image_bgr.copy()
+
+    height, width = image_bgr.shape[:2]
+    if height <= 0 or width <= 0:
+        return image_bgr.copy()
+
+    scale = min(float(image_size) / float(width), float(image_size) / float(height))
+    new_width = max(1, int(round(width * scale)))
+    new_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(image_bgr, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+
+    canvas = np.zeros((image_size, image_size, 3), dtype=np.uint8)
+    pad_x = (image_size - new_width) // 2
+    pad_y = (image_size - new_height) // 2
+    canvas[pad_y : pad_y + new_height, pad_x : pad_x + new_width] = resized
+    return canvas
+
+
 def _normalize_color_name(label_name: str) -> str | None:
     upper = label_name.upper()
     if upper.startswith("R_"):
@@ -172,7 +192,7 @@ class CornerPointDataset(Dataset[dict[str, object]]):
 
     def __init__(
         self,
-        data_root: str | Path,
+        root: str | Path,
         transform: Callable[[Image.Image], object] | None = None,
         target_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
         valid_label_names: Iterable[str] = VALID_LABEL_NAMES,
@@ -181,7 +201,7 @@ class CornerPointDataset(Dataset[dict[str, object]]):
         cache_prefix: str = "corner_point_dataset",
     ) -> None:
         super().__init__()
-        self.data_root = Path(data_root)
+        self.data_root = Path(root)
         self.transform = transform
         self.target_transform = target_transform
         self.valid_label_names = set(valid_label_names)
@@ -241,15 +261,16 @@ class CornerPointDataset(Dataset[dict[str, object]]):
                     if not image_path.is_file() or not _is_image_file(image_path):
                         continue
 
-                    image_bgr = cv2.imread(str(image_path))
+                    raw_image_bgr = cv2.imread(str(image_path))
+                    if raw_image_bgr is None or raw_image_bgr.size == 0:
+                        continue
+                    image_bgr = _letterbox_to_square(raw_image_bgr, self.image_size)
                     success, corners_xy = detect_colored_quad_corners(image_bgr, color)
                     if not success or corners_xy is None:
                         continue
 
                     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
                     image_pil = Image.fromarray(image_rgb)
-                    if self.image_size > 0:
-                        image_pil = image_pil.resize((self.image_size, self.image_size), Image.BILINEAR)
                     image_np = np.asarray(image_pil, dtype=np.uint8)
 
                     corner_tuple = tuple(float(v) for v in corners_xy)
@@ -347,7 +368,7 @@ class CornerPointDataset(Dataset[dict[str, object]]):
 
 
 def build_dataset(
-    data_root: str | Path = "data/coworkers_for_KFS/labeled",
+    root: str | Path = "data/coworkers_for_KFS/labeled",
     transform: Callable[[Image.Image], object] | None = None,
     target_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
     image_size: int = 300,
@@ -355,7 +376,7 @@ def build_dataset(
     cache_prefix: str = "corner_point_dataset",
 ) -> CornerPointDataset:
     return CornerPointDataset(
-        data_root=data_root,
+        root=root,
         transform=transform,
         target_transform=target_transform,
         image_size=image_size,
