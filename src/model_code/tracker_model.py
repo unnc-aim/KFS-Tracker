@@ -1,54 +1,44 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 import torch
 import torch.nn as nn
-from torchvision.models import efficientnet_b3,efficientnet_b0
+from torchvision.models import efficientnet_b3
 
 
 
 
 class TrackerModel(nn.Module):
-    """A small CNN baseline for tracker-related classification/regression tasks."""
+    """A CNN model for bbox tracking regression only."""
 
     def __init__(
         self,
         num_outputs: int = 4,
-        hidden_size:int=512,
-        class_num=32
+        hidden_size: int = 512,
     ) -> None:
         super().__init__()
 
-        self.tracker_backbone = efficientnet_b3()
-        self.classifier_backbone=efficientnet_b0()
-        self.tracker_backbone.classifier=nn.Linear(1536,hidden_size)
-        self.classifier_backbone.classifier=nn.Linear(1280,hidden_size)
+        self.backbone = efficientnet_b3()
+        self.backbone.classifier = nn.Linear(1536, hidden_size)
         self.head = nn.Sequential(
-
-            nn.Linear(hidden_size, hidden_size//2),
+            nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(inplace=True),
-            nn.Linear(hidden_size//2, num_outputs),
-        )
-        self.classifier=nn.Sequential(
-            nn.Linear(hidden_size,hidden_size//2),
-            nn.ReLU(),
-            nn.Linear(hidden_size//2,class_num)
+            nn.Linear(hidden_size // 2, num_outputs),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tracker_x = self.tracker_backbone(x)
-        classifier_x=self.classifier_backbone(x)
-        return self.head(tracker_x),self.classifier(classifier_x)
+        x = self.backbone(x)
+        return self.head(x)
 
 
 def build_tracker_model(
     num_outputs: int = 4,
-    hidden_size: int=512
+    hidden_size: int = 512,
 ) -> TrackerModel:
     return TrackerModel(
         num_outputs=num_outputs,
-        hidden_size=hidden_size
+        hidden_size=hidden_size,
     )
 
 

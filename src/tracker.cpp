@@ -211,7 +211,7 @@ PoseEstimationResult CubeTracker3D::detect(const cv::Mat& input, const std::stri
         }
 
         PoseCandidate pose = solvePoseFromHexagon(hexagon.corners);
-        if (!pose.valid) {
+        if (!pose.valid || !std::isfinite(pose.reprojectionError) || pose.reprojectionError > maxReprojectionErrorPx_) {
             result.annotated = drawAnnotation(input, hexagon.contour, hexagon.corners, {}, cv::Vec3d(), cv::Vec3d(), -1.0);
             result.hexagonCorners = hexagon.corners;
             result.imageCorners2d.assign(hexagon.corners.begin(), hexagon.corners.end());
@@ -649,6 +649,9 @@ CubeTracker3D::PoseCandidate CubeTracker3D::solvePoseFromHexagon(const std::arra
 
                 double reprojectionError = computeReprojectionError(objectPoints, imagePoints, rvec, tvec);
                 if (!std::isfinite(reprojectionError)) {
+                    continue;
+                }
+                if (reprojectionError > maxReprojectionErrorPx_) {
                     continue;
                 }
 

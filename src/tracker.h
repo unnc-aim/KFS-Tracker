@@ -100,6 +100,7 @@ private:
     float originWidth_;
     float originHeight_;
     float originDepth_;
+    double maxReprojectionErrorPx_ = 8.0;
     cv::Mat cameraMatrix_;
     cv::Mat distCoeffs_;
     int warpSize_;
