@@ -18,6 +18,7 @@ add_executable(myapp
     src/tracker.cpp
     src/2D_tracker.cpp
     src/bbox_tracking_classify.cpp
+    src/heatmap_classifier_infer.cpp
 )
 target_link_libraries(myapp ${OpenCV_LIBS} ${TORCH_LIBRARIES})
 target_compile_definitions(myapp PRIVATE -D_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)

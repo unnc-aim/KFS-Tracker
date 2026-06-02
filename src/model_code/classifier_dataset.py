@@ -21,6 +21,7 @@ class KFSClassifierDataset(Dataset[dict[str, object]]):
         transform: Callable[[Image.Image], object] | None = None,
         target_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
         valid_label_names: Iterable[str] = VALID_LABEL_NAMES,
+        use_cache: bool = False,
     ) -> None:
         super().__init__()
         self.root = Path(root)
@@ -28,6 +29,7 @@ class KFSClassifierDataset(Dataset[dict[str, object]]):
         self.target_transform = target_transform
         self.valid_label_names = list(valid_label_names)
         self.valid_label_name_set = set(valid_label_names)
+        self.use_cache = use_cache
 
         if not self.root.exists():
             raise FileNotFoundError(f"Dataset root does not exist: {self.root}")
@@ -37,7 +39,7 @@ class KFSClassifierDataset(Dataset[dict[str, object]]):
         self.samples: list[tuple[Path, int, str, str]] = self._collect_samples()
         if not self.samples:
             raise RuntimeError(f"No valid classification samples found under: {self.root}")
-        self.image_cache: list[Image.Image] = self._build_image_cache()
+        self.image_cache: list[Image.Image] | None = self._build_image_cache() if self.use_cache else None
 
     def _collect_samples(self) -> list[tuple[Path, int, str, str]]:
         out: list[tuple[Path, int, str, str]] = []
@@ -72,7 +74,11 @@ class KFSClassifierDataset(Dataset[dict[str, object]]):
 
     def __getitem__(self, index: int) -> dict[str, object]:
         image_path, class_id, label_name, school_name = self.samples[index]
-        image = self.image_cache[index]
+        if self.use_cache:
+            assert self.image_cache is not None
+            image = self.image_cache[index]
+        else:
+            image = Image.open(image_path).convert("RGB")
 
         if self.transform is not None:
             image_out = self.transform(image)
@@ -85,6 +91,8 @@ class KFSClassifierDataset(Dataset[dict[str, object]]):
                 .float()
                 / 255.0
             )
+        if not self.use_cache:
+            image.close()
 
         target: dict[str, object] = {
             "class_id": torch.tensor(class_id, dtype=torch.long),
@@ -102,9 +110,11 @@ def build_classifier_dataset(
     root: str | Path = "data/coworkers_for_KFS/labeled",
     transform: Callable[[Image.Image], object] | None = None,
     target_transform: Callable[[dict[str, object]], dict[str, object]] | None = None,
+    use_cache: bool = False,
 ) -> KFSClassifierDataset:
     return KFSClassifierDataset(
         root=root,
         transform=transform,
         target_transform=target_transform,
+        use_cache=use_cache,
     )
