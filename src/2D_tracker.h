@@ -30,6 +30,7 @@ public:
                    int warpSize = 224);
 
     PlaneTracker2DResult detect(const cv::Mat& input, const std::string& color) const;
+    PlaneTracker2DResult detectFromCorners(const cv::Mat& input, const std::array<cv::Point2f, 4>& corners) const;
 
 private:
     struct QuadCandidate {
@@ -60,6 +61,7 @@ private:
 
     float originWidth_;
     float originHeight_;
+    double maxReprojectionErrorPx_ = 8.0;
     cv::Mat cameraMatrix_;
     cv::Mat distCoeffs_;
     int warpSize_;

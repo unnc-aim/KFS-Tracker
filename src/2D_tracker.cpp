@@ -79,12 +79,67 @@ PlaneTracker2DResult PlaneTracker2D::detect(const cv::Mat& input, const std::str
         }
 
         result.reprojectionError = computeReprojectionError(objectPoints, imagePoints, result.rvec, result.tvec);
+        if (!std::isfinite(result.reprojectionError) || result.reprojectionError > maxReprojectionErrorPx_) {
+            result.annotated = drawAnnotation(input, candidate.contour, candidate.corners, cv::Vec3d(), cv::Vec3d(), -1.0);
+            result.reprojectionError = -1.0;
+            return result;
+        }
         result.annotated = drawAnnotation(input,
                                           candidate.contour,
                                           candidate.corners,
                                           result.rvec,
                                           result.tvec,
                                           result.reprojectionError);
+        result.found = true;
+        return result;
+    } catch (const cv::Exception&) {
+        result.annotated = input.clone();
+        return result;
+    }
+}
+
+PlaneTracker2DResult PlaneTracker2D::detectFromCorners(const cv::Mat& input, const std::array<cv::Point2f, 4>& corners) const {
+    PlaneTracker2DResult result;
+    if (input.empty()) {
+        return result;
+    }
+    try {
+        if (!isRectangleLike(corners)) {
+            result.annotated = input.clone();
+            return result;
+        }
+
+        result.corners = corners;
+        result.contourArea = std::abs(cv::contourArea(std::vector<cv::Point2f>(corners.begin(), corners.end())));
+        result.warped = warpToSquare(input, corners, &result.homography);
+
+        std::vector<cv::Point3f> objectPoints = buildObjectPoints();
+        std::vector<cv::Point2f> imagePoints(corners.begin(), corners.end());
+
+        bool pnpOk = cv::solvePnP(objectPoints,
+                                  imagePoints,
+                                  cameraMatrix_,
+                                  distCoeffs_,
+                                  result.rvec,
+                                  result.tvec,
+                                  false,
+                                  cv::SOLVEPNP_IPPE);
+        if (!pnpOk) {
+            pnpOk = cv::solvePnP(objectPoints, imagePoints, cameraMatrix_, distCoeffs_, result.rvec, result.tvec);
+        }
+        if (!pnpOk) {
+            result.annotated = drawAnnotation(input, {}, corners, cv::Vec3d(), cv::Vec3d(), -1.0);
+            return result;
+        }
+
+        result.reprojectionError = computeReprojectionError(objectPoints, imagePoints, result.rvec, result.tvec);
+        if (!std::isfinite(result.reprojectionError) || result.reprojectionError > maxReprojectionErrorPx_) {
+            result.annotated = drawAnnotation(input, {}, corners, cv::Vec3d(), cv::Vec3d(), -1.0);
+            result.reprojectionError = -1.0;
+            return result;
+        }
+
+        result.annotated = drawAnnotation(input, {}, corners, result.rvec, result.tvec, result.reprojectionError);
         result.found = true;
         return result;
     } catch (const cv::Exception&) {

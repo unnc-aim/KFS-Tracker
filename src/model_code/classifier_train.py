@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 
+
 from PIL import Image
 import torch
 import torch.nn as nn
@@ -35,6 +36,7 @@ class TrainConfig:
     image_size: int = 300
     load_checkpoint: str = ""
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    use_cache: bool = False
 
 
 def set_seed(seed: int) -> None:
@@ -60,7 +62,11 @@ def build_image_transform(image_size: int) -> callable:
 
 
 def build_dataloaders(cfg: TrainConfig) -> tuple[DataLoader, DataLoader, int]:
-    dataset = build_classifier_dataset(root=cfg.dataset_root, transform=build_image_transform(cfg.image_size))
+    dataset = build_classifier_dataset(
+        root=cfg.dataset_root,
+        transform=build_image_transform(cfg.image_size),
+        use_cache=cfg.use_cache,
+    )
     total_size = len(dataset)
     val_size = max(1, int(total_size * cfg.val_ratio))
     train_size = total_size - val_size
@@ -232,6 +238,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--image-size", type=int, default=TrainConfig.image_size)
     parser.add_argument("--device", type=str, default=TrainConfig.device)
     parser.add_argument("--load-checkpoint", type=str, default=TrainConfig.load_checkpoint)
+    parser.add_argument("--use-cache", dest="use_cache", action="store_true", help="Enable in-memory image cache for dataset.")
+    parser.add_argument("--no-use-cache", dest="use_cache", action="store_false", help="Disable in-memory image cache for dataset.")
+    parser.set_defaults(use_cache=TrainConfig.use_cache)
     args = parser.parse_args()
 
     return TrainConfig(
@@ -248,6 +257,7 @@ def parse_args() -> TrainConfig:
         image_size=args.image_size,
         load_checkpoint=args.load_checkpoint,
         device=args.device,
+        use_cache=args.use_cache,
     )
 
 
