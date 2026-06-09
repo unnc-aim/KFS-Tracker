@@ -1,4 +1,15 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "C_Cpp.default.compilerPath": "/usr/bin/c++",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.intelliSenseMode": "macos-clang-arm64",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/src",
+        "/opt/homebrew/Cellar/opencv/4.11.0_1/include/opencv4",
+        "${workspaceFolder}/deps/libtorch/include",
+        "${workspaceFolder}/deps/libtorch/include/torch/csrc/api/include"
+    ],
+    "C_Cpp.default.defines": [
+        "_SILENCE_ALL_CXX17_DEPRECATION_WARNINGS"
+    ]
 }

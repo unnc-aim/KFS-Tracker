@@ -1,12 +1,16 @@
-#include "2D_tracker.h"
-#include "heatmap_classifier_infer.h"
+#include "bbox_tracking_classify.h"
+#include "camera_provider.h"
+#include "heatmap_tracking_classify.h"
 #include <opencv2/opencv.hpp>
 
+#include <cstdlib>
+#include <functional>
 #include <iostream>
-#include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
+// 命令行参数解析：查找 --key 后面的值，找不到则返回 def
 static std::string getArgValue(int argc, char** argv, const std::string& key, const std::string& def) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (key == argv[i]) {
@@ -16,78 +20,318 @@ static std::string getArgValue(int argc, char** argv, const std::string& key, co
     return def;
 }
 
-int main(int argc, char** argv) {
-    try {
-        std::string imagePath = getArgValue(argc, argv, "--image", "image.jpg");
-        std::string outputPath = getArgValue(argc, argv, "--output", "annotated.jpg");
-        std::string heatmapModelPath = getArgValue(argc, argv, "--heatmap_model", "model/corner_heatmap_localizer.pt");
-        std::string classifierModelPath = getArgValue(argc, argv, "--classifier_model", "model/tracker_classifier.pt");
-        int inputSize = std::stoi(getArgValue(argc, argv, "--input_size", "300"));
-        float originWidth = std::stof(getArgValue(argc, argv, "--origin_width", "0.35"));
-        float originHeight = std::stof(getArgValue(argc, argv, "--origin_height", "0.35"));
+// 检查环境变量 DISABLE_RENDERER，默认弹窗渲染
+static bool shouldRenderOutput()
+{
+    const char *env = std::getenv("DISABLE_RENDERER");
+    if (env == nullptr)
+        return true;
+    std::string val(env);
+    return val.empty() || val == "0" || val == "false" || val == "FALSE";
+}
 
-        double fx = std::stod(getArgValue(argc, argv, "--fx", "0"));
-        double fy = std::stod(getArgValue(argc, argv, "--fy", "0"));
-        double cx = std::stod(getArgValue(argc, argv, "--cx", "0"));
-        double cy = std::stod(getArgValue(argc, argv, "--cy", "0"));
+// 推理器 variant 类型
+using Predictor = std::variant<tracker::BboxTrackingClassifier, tracker::HeatmapTrackingClassifier>;
 
-        cv::Mat img = cv::imread(imagePath);
-        if (img.empty()) {
-            std::cerr << "Could not open image: " << imagePath << std::endl;
-            return -1;
+// 单帧推理结果输出到 stdout（真实推理耗时 + 理论帧率）
+static void printInferenceResult(const tracker::BboxClassificationResult &result, int frameIndex, double inferMs)
+{
+    double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
+    if (!result.valid)
+    {
+        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
+                  << " (" << cv::format("%.1f", inferFps) << " fps)"
+                  << " | bbox invalid/empty." << std::endl;
+    }
+    else
+    {
+        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
+                  << " (" << cv::format("%.1f", inferFps) << " fps)"
+                  << " | bbox: " << result.bbox
+                  << " | class: " << result.className
+                  << " (id=" << result.classId
+                  << ", score=" << result.classScore << ")"
+                  << std::endl;
+    }
+}
+
+static void printInferenceResult(const tracker::HeatmapTrackingResult &result, int frameIndex, double inferMs)
+{
+    double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
+    if (!result.valid)
+    {
+        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
+                  << " (" << cv::format("%.1f", inferFps) << " fps)"
+                  << " | corners not detected." << std::endl;
+    }
+    else
+    {
+        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
+                  << " (" << cv::format("%.1f", inferFps) << " fps)"
+                  << " | corners:";
+        for (size_t i = 0; i < result.corners.size(); ++i)
+        {
+            std::cout << " (" << result.corners[i].x << "," << result.corners[i].y << ")";
+        }
+        std::cout << std::endl;
+    }
+}
+
+// 统一推理 + 计时 + 打印 + 返回标注图和耗时
+struct InferOutputWithTime {
+    bool valid = false;
+    cv::Mat annotated;
+    double inferMs = 0.0;
+};
+
+static InferOutputWithTime inferPrintAnnotated(Predictor &predictor, const cv::Mat &image,
+                                                int frameIndex) {
+    InferOutputWithTime out;
+    const double tickFreq = cv::getTickFrequency();
+
+    std::visit([&](auto &p) {
+        using T = std::decay_t<decltype(p)>;
+        int64_t t0 = cv::getTickCount();
+        if constexpr (std::is_same_v<T, tracker::BboxTrackingClassifier>) {
+            auto r = p.infer(image);
+            int64_t t1 = cv::getTickCount();
+            out.inferMs = static_cast<double>(t1 - t0) / tickFreq * 1000.0;
+            printInferenceResult(r, frameIndex, out.inferMs);
+            out.valid = r.valid;
+            out.annotated = r.annotated;
+        } else {
+            auto r = p.infer(image);
+            int64_t t1 = cv::getTickCount();
+            out.inferMs = static_cast<double>(t1 - t0) / tickFreq * 1000.0;
+            printInferenceResult(r, frameIndex, out.inferMs);
+            out.valid = r.valid;
+            out.annotated = r.annotated;
+        }
+    }, predictor);
+    return out;
+}
+
+// 摄像头/视频流模式：通过 CameraProvider 抽象层采集帧
+static int runCamera(Predictor &predictor,
+                     std::unique_ptr<camera::CameraProvider> provider,
+                     bool render)
+{
+    const std::string windowName = "KFS-Tracker";
+    if (render)
+    {
+        cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
+    }
+
+    camera::FrameBundle bundle;
+    int frameIndex = 0;
+    double fps = 0.0;
+
+    std::cout << "Camera stream started (" << provider->providerName()
+              << ", " << provider->frameWidth() << "x" << provider->frameHeight() << "). "
+              << "Press 'q' or ESC to quit." << std::endl;
+
+    while (true)
+    {
+        if (!provider->grab(bundle))
+        {
+            std::cerr << "[frame " << frameIndex << "] empty frame, stopping." << std::endl;
+            break;
         }
 
-        if (fx <= 0.0) fx = static_cast<double>(img.cols);
-        if (fy <= 0.0) fy = static_cast<double>(img.rows);
-        if (cx <= 0.0) cx = static_cast<double>(img.cols) * 0.5;
-        if (cy <= 0.0) cy = static_cast<double>(img.rows) * 0.5;
-        cv::Mat cameraMatrix = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+        // 推理 + 打印（内部计时）
+        auto inferOut = inferPrintAnnotated(predictor, bundle.color, frameIndex);
+        double inferMs = inferOut.inferMs;
+        double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
+        fps = fps * 0.9 + inferFps * 0.1;
 
-        tracker::HeatmapCornerInfer heatmapInfer(heatmapModelPath, inputSize);
-        tracker::HeatmapInferResult heatmapResult = heatmapInfer.infer(img);
+        // bundle.intrinsics 后续可传给 CubeTracker3D / PlaneTracker2D 做位姿估计
 
-        if (!heatmapResult.valid) {
-            std::cerr << "Heatmap tracker failed to produce corners." << std::endl;
-            return -1;
+        if (render)
+        {
+            int y = inferOut.annotated.rows - 20;
+            cv::putText(inferOut.annotated,
+                        cv::format("Infer: %.1f ms", inferMs),
+                        cv::Point(20, y - 28),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                        cv::Scalar(0, 255, 255), 2);
+            cv::putText(inferOut.annotated,
+                        cv::format("Max FPS: %.1f (EMA %.1f)", inferFps, fps),
+                        cv::Point(20, y),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.7,
+                        cv::Scalar(0, 255, 0), 2);
+
+            cv::imshow(windowName, inferOut.annotated);
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 27)
+            {
+                std::cout << "Quit signal received." << std::endl;
+                break;
+            }
         }
 
-        tracker::PlaneTracker2D planeTracker(originWidth, originHeight, cameraMatrix);
-        tracker::PlaneTracker2DResult poseResult = planeTracker.detectFromCorners(img, heatmapResult.corners);
-        if (!poseResult.found) {
-            std::cerr << "Pose estimation failed (likely reprojection error too large)." << std::endl;
-            cv::imwrite(outputPath, heatmapResult.annotated.empty() ? img : heatmapResult.annotated);
+        ++frameIndex;
+    }
+
+    if (render)
+    {
+        cv::destroyWindow(windowName);
+    }
+    std::cout << "Camera stream ended after " << frameIndex << " frames." << std::endl;
+    return 0;
+}
+
+// 单图模式
+static int runImage(Predictor &predictor,
+                    const std::string &imagePath,
+                    const std::string &outputPath,
+                    bool render)
+{
+    cv::Mat img = cv::imread(imagePath);
+    if (img.empty())
+    {
+        std::cerr << "Could not open image: " << imagePath << std::endl;
+        return -1;
+    }
+
+    // 打印推理结果
+    std::visit([&](auto &p) {
+        using T = std::decay_t<decltype(p)>;
+        if constexpr (std::is_same_v<T, tracker::BboxTrackingClassifier>) {
+            tracker::BboxClassificationResult result = p.infer(img);
+            if (!result.valid) {
+                std::cout << "Inference finished, but bbox is invalid/empty." << std::endl;
+            } else {
+                std::cout << "Bbox contour points:" << std::endl;
+                for (size_t i = 0; i < result.bboxContour.size(); ++i) {
+                    std::cout << "  [" << i << "] " << result.bboxContour[i] << std::endl;
+                }
+            }
+            std::cout << "Classification: " << result.className << " (id=" << result.classId
+                      << ", score=" << result.classScore << ")" << std::endl;
+            cv::imwrite(outputPath, result.annotated);
+        } else {
+            tracker::HeatmapTrackingResult result = p.infer(img);
+            if (!result.valid) {
+                std::cout << "Inference finished, but corners not detected." << std::endl;
+            } else {
+                std::cout << "Corner points:" << std::endl;
+                const char* names[] = {"TL", "BL", "BR", "TR"};
+                for (size_t i = 0; i < result.corners.size(); ++i) {
+                    std::cout << "  [" << names[i] << "] (" << result.corners[i].x
+                              << ", " << result.corners[i].y << ")" << std::endl;
+                }
+            }
+            cv::imwrite(outputPath, result.annotated);
+        }
+    }, predictor);
+
+    std::cout << "Saved: " << outputPath << std::endl;
+
+    if (render)
+    {
+        cv::Mat annotatedImg = cv::imread(outputPath);
+        const std::string windowName = "KFS-Tracker";
+        cv::namedWindow(windowName, cv::WINDOW_NORMAL);
+        cv::imshow(windowName, annotatedImg);
+        std::cout << "Press any key to close window..." << std::endl;
+        cv::waitKey(0);
+        cv::destroyWindow(windowName);
+    }
+
+    return 0;
+}
+
+// 从命令行参数构造 CameraConfig
+static camera::CameraConfig buildCameraConfig(int argc, char **argv)
+{
+    camera::CameraConfig cfg;
+    cfg.type = getArgValue(argc, argv, "--camera_type", "opencv");
+    cfg.intrinsicsPath = getArgValue(argc, argv, "--intrinsics", "");
+    cfg.cameraIndex = std::stoi(getArgValue(argc, argv, "--camera_index", "0"));
+    cfg.videoPath = getArgValue(argc, argv, "--video", "");
+    cfg.width = std::stoi(getArgValue(argc, argv, "--width", "1280"));
+    cfg.height = std::stoi(getArgValue(argc, argv, "--height", "720"));
+    return cfg;
+}
+
+int main(int argc, char **argv)
+{
+    try
+    {
+        // --help 作为独立标志，没有后续值，不能通过 getArgValue 检测
+        bool showHelp = (argc < 2);
+        for (int i = 1; i < argc; ++i)
+        {
+            if (std::string(argv[i]) == "--help" || std::string(argv[i]) == "-h")
+            {
+                showHelp = true;
+                break;
+            }
+        }
+        if (showHelp)
+        {
+            std::cout << "Usage: " << argv[0] << " [options]\n"
+                      << "\n"
+                      << "Modes:\n"
+                      << "  --image <path>          Single-image mode (default: image.jpg)\n"
+                      << "  --camera_type <type>    Camera stream mode; types: opencv | realsense | file\n"
+                      << "\n"
+                      << "Camera options:\n"
+                      << "  --camera_index <int>    Camera device index (default: 0)\n"
+                      << "  --intrinsics <path>     Intrinsics YAML file (OpenCV calibration format)\n"
+                      << "  --video <path>          Video source for --camera_type file\n"
+                      << "  --width <int>           Desired frame width (default: 1280)\n"
+                      << "  --height <int>          Desired frame height (default: 720)\n"
+                      << "\n"
+                      << "Inference options:\n"
+                      << "  --model_type <type>     Model type: bbox | heatmap (default: bbox)\n"
+                      << "  --output <path>         Output annotated image path (default: annotated.jpg)\n"
+                      << "  --model <path>          Model file path (default: model/tracker_localizer.pt)\n"
+                      << "  --input_size <int>      Model input size (default: 300)\n"
+                      << "\n"
+                      << "Environment:\n"
+                      << "  DISABLE_RENDERER=1      Suppress OpenCV GUI window\n";
             return 0;
         }
 
-        tracker::ImageClassifierInfer classifierInfer(classifierModelPath, inputSize);
-        tracker::ClassifierInferResult clsResult = classifierInfer.infer(img);
+        bool render = shouldRenderOutput();
+        std::string modelType = getArgValue(argc, argv, "--model_type", "bbox");
+        std::string modelPath = getArgValue(argc, argv, "--model", "model/tracker_localizer.pt");
+        int inputSize = std::stoi(getArgValue(argc, argv, "--input_size", "300"));
 
-        cv::Mat finalAnnotated = poseResult.annotated.empty() ? img.clone() : poseResult.annotated.clone();
-        if (clsResult.valid) {
-            std::string clsText = "class: " + clsResult.className + " (id=" + std::to_string(clsResult.classId) +
-                                  ", p=" + cv::format("%.3f", clsResult.classScore) + ")";
-            cv::putText(finalAnnotated, clsText, cv::Point(20, 105), cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 0), 2);
+        Predictor predictor = [&]() -> Predictor {
+            if (modelType == "heatmap") {
+                return tracker::HeatmapTrackingClassifier(modelPath, inputSize);
+            }
+            return tracker::BboxTrackingClassifier(modelPath, inputSize);
+        }();
+
+        // 判断是摄像头流模式还是单图模式
+        std::string cameraType = getArgValue(argc, argv, "--camera_type", "");
+        if (!cameraType.empty())
+        {
+            camera::CameraConfig cfg = buildCameraConfig(argc, argv);
+            cfg.type = cameraType;
+            auto provider = camera::createCameraProvider(cfg);
+            if (!provider)
+            {
+                return -1;
+            }
+            return runCamera(predictor, std::move(provider), render);
         }
 
-        std::cout << "Detected corners (TL, BL, BR, TR):" << std::endl;
-        for (size_t i = 0; i < heatmapResult.corners.size(); ++i) {
-            std::cout << "  [" << i << "] " << heatmapResult.corners[i] << std::endl;
-        }
-        std::cout << "Pose rvec: " << poseResult.rvec << std::endl;
-        std::cout << "Pose tvec: " << poseResult.tvec << std::endl;
-        std::cout << "Pose reprojection error: " << poseResult.reprojectionError << std::endl;
-        if (clsResult.valid) {
-            std::cout << "Classification: " << clsResult.className << " (id=" << clsResult.classId
-                      << ", score=" << clsResult.classScore << ")" << std::endl;
-        }
-
-        cv::imwrite(outputPath, finalAnnotated);
-        std::cout << "Saved: " << outputPath << std::endl;
-        return 0;
-    } catch (const cv::Exception& e) {
+        // 单图模式
+        std::string imagePath = getArgValue(argc, argv, "--image", "image.jpg");
+        std::string outputPath = getArgValue(argc, argv, "--output", "annotated.jpg");
+        return runImage(predictor, imagePath, outputPath, render);
+    }
+    catch (const cv::Exception &e)
+    {
         std::cerr << "[OpenCV][main] " << e.what() << std::endl;
         return -1;
-    } catch (const std::exception& e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "[std::exception][main] " << e.what() << std::endl;
         return -1;
     }

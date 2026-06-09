@@ -1,0 +1,4 @@
+- [ ] 测试 realsense 模式是否可用（包括 compile, sdk 和内参矩阵）
+- [ ] 上车测试识别准确率
+- [ ] 测试坐标输出在三维场景下的稳定性
+- [ ] 为 classifier 创建单独的 backbone 并接入主模型
