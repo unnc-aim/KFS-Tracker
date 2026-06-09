@@ -217,6 +217,147 @@ distortion_coefficients: !!opencv-matrix
 
 > **说明**：热力图模型本身只输出 4 个角点坐标；分类由独立的 `ImageClassifierInfer(tracker_classifier.pt)` 统一负责，与 bbox 模式共用同一分类模型。
 
+## 作为 ROS 2 节点封装（ROS 2 Humble / colcon）
+
+本包同时是一个 ROS 2 Humble 包 `kfs_tracker`，提供节点 `kfs_tracker_node`，支持「从 ROS 图像话题读入视频流」与「本地直连摄像头」两种输入，并把标注图与 tracker + classification 结果发布到话题。核心算法复用 `kfs_tracker_core` 静态库，与 CLI 可执行 `kfs_tracker` 并存（无 ROS 环境下 CLI 仍可独立运行）。
+
+> 部署约束：ROS 2 构建与运行须在 **Linux（Ubuntu 22.04）/ ROS 2 Humble** 上；macOS 无 ROS 2 Humble 官方支持，不能 `colcon` 构建。
+
+### ROS 2 环境依赖安装（Ubuntu 22.04 / ROS 2 Humble）
+
+假设已安装 ROS 2 Humble 并 source 过 `/opt/ros/humble/setup.bash`。本节点额外需要 **cv_bridge + 系统 OpenCV** 与 **LibTorch**。
+
+1. **系统 OpenCV + cv_bridge / message_filters / image_transport**（apt 安装）：
+
+   ```bash
+   sudo apt update
+   sudo apt install -y \
+       ros-humble-cv-bridge \
+       ros-humble-message-filters \
+       ros-humble-image-transport \
+       libopencv-dev
+   ```
+
+   > ⚠️ **ABI 一致性（最关键）**：cv_bridge 链接的是 apt 的 OpenCV 4.x。**LibTorch 必须使用同一份系统 OpenCV**（即下载「不带 bundled OpenCV」的 CPU 版 libtorch，让它复用系统的 `libopencv_*`）。否则同一进程加载两份 OpenCV 会运行期 double-free / `imshow` 崩溃。验证：构建后 `ldd install/kfs_tracker/lib/kfs_tracker/kfs_tracker_node | grep -i opencv`，应只看到一份 `libopencv_*.so.4.x`。
+
+2. **LibTorch（C++，cxx11 ABI CPU 版）**——解压到包内 `deps/libtorch`（`CMakeLists.txt` 固定从 `${CMAKE_CURRENT_SOURCE_DIR}/deps/libtorch/share/cmake` 加载）：
+
+   ```bash
+   cd <本包根目录 KFS-Tracker>
+   mkdir -p deps
+   # Ubuntu 22.04 / gcc 9+ 必须用 cxx11 ABI 版（文件名含 cxx11-abi）
+   curl -L https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.7.0%2Bcpu.zip -o /tmp/libtorch.zip
+   unzip -qo /tmp/libtorch.zip -d deps/
+   ```
+
+   > ⚠️ 务必选 **`cxx11-abi`** 版；误用 pre-cxx11 版会链接报 `undefined reference to c10::...` 或 `std::...`。
+   > 验证：`ls deps/libtorch/share/cmake/Torch/TorchConfig.cmake` 应存在。
+
+3. **（可选）Intel RealSense SDK**——仅当用 `camera_type=realsense` **本地直连**时需要；若改用 `realsense2_camera` 节点发布 topic 再用 `tracker_topic.launch.py` 订阅，则**不需要**：
+
+   ```bash
+   sudo apt install -y librealsense2-dev
+   # 之后用 -DENABLE_REALSENSE=ON 构建（见下）
+   ```
+
+### 构建
+
+```bash
+cd ~/26RC_R2_ws
+# 默认（不含 RealSense 本地直连）
+colcon build --packages-select kfs_tracker
+# 启用 RealSense 本地直连（需要 librealsense2）
+colcon build --packages-select kfs_tracker --cmake-args -DENABLE_REALSENSE=ON
+
+source install/setup.bash
+```
+
+构建产物：
+- `kfs_tracker`（CLI，原单图/流模式）
+- `kfs_tracker_node`（ROS 2 节点）
+
+### 发布 / 订阅话题
+
+| 话题 | 类型 | 方向 | 说明 |
+|------|------|------|------|
+| `/kfs_tracker/detection` | `kfs_tracker/msg/KFSDetection` | 发布 | 定位（角点/bbox）+ 分类 + 推理耗时 + 可选中心距离 |
+| `/kfs_tracker/annotated_image` | `sensor_msgs/Image` | 发布 | 标注图（OpenCV UI 画面） |
+| `image_topic` | `sensor_msgs/Image` 或 `CompressedImage` | 订阅 | topic 模式彩色图输入 |
+| `camera_info_topic` | `sensor_msgs/CameraInfo` | 订阅 | 相机内参（topic 模式，可选） |
+| `depth_topic` | `sensor_msgs/Image`（16UC1 mm） | 订阅 | 对齐深度图（`use_depth=true` 时） |
+
+`KFSDetection` 字段：`header` / `valid` / `model_type`（heatmap\|bbox）/ `corners[4]` / `bbox_min`·`bbox_max` / `class_id`·`class_name`·`class_score`·`class_valid` / `infer_ms` / `center_distance_m`（-1.0=无深度）。
+
+### 节点参数
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `input_source` | `topic` | `local`（本地直连）\| `topic`（订阅 ROS 图像） |
+| `model_type` | `heatmap` | `heatmap`（角点）\| `bbox` |
+| `model` / `classifier_model` | share 下默认 | 模型路径，留空用 `share/kfs_tracker/model/*.pt` |
+| `input_size` | `300` | 模型输入尺寸 |
+| `display_ui` | `false` | `true` 时本地 `cv::imshow`（关闭 UI 渲染则保持 `false`，headless 必须关） |
+| `publish_annotated` | `true` | 是否发布标注图话题 |
+| `image_topic` | `/camera/color/image_raw` | 彩色图话题 |
+| `camera_info_topic` | `/camera/color/camera_info` | 内参话题 |
+| `depth_topic` | `/camera/aligned_depth_to_color/image_raw` | 对齐深度图话题 |
+| `use_compressed` | `false` | `true` 订 `CompressedImage`，否则 raw `Image` |
+| `use_depth` | `false` | `true` 同步订深度（RGB-D，携带 `center_distance_m`） |
+| `camera_type` | `opencv` | `opencv`\|`realsense`\|`file`（local 模式） |
+| `camera_index` / `video_path` / `intrinsics_path` | — | local 模式参数 |
+| `frame_width` / `frame_height` / `grab_fps` | 1280 / 720 / 30.0 | local 模式采集 |
+| `detection_topic` / `annotated_topic` | 见上 | 输出话题名（绝对名） |
+
+### 启动示例
+
+```bash
+# 1) 从 ROS 图像话题读入（raw Image + CameraInfo）
+ros2 launch kfs_tracker tracker_topic.launch.py \
+    image_topic:=/image_raw model_type:=heatmap
+
+# 2) 压缩图输入
+ros2 launch kfs_tracker tracker_topic.launch.py \
+    image_topic:=/camera/image_raw/compressed use_compressed:=true
+
+# 3) RGB-D（RealSense2 节点发布 color + aligned_depth，携带中心距离）
+ros2 launch kfs_tracker tracker_topic.launch.py \
+    use_depth:=true image_topic:=/camera/color/image_raw \
+    depth_topic:=/camera/aligned_depth_to_color/image_raw \
+    camera_info_topic:=/camera/color/camera_info
+
+# 4) 本地直连 OpenCV 摄像头（调试，开 imshow）
+ros2 launch kfs_tracker tracker_local.launch.py camera_type:=opencv display_ui:=true
+
+# 5) 回放视频文件（file 模式需内参）
+ros2 launch kfs_tracker tracker_local.launch.py camera_type:=file \
+    video_path:=/path/test.mp4 intrinsics_path:=/path/config/intrinsics_example.yaml
+
+# 6) 本地直连 RealSense（需 ENABLE_REALSENSE=ON 构建且设备已连）
+ros2 launch kfs_tracker tracker_realsense.launch.py
+```
+
+> RealSense 的两种路径：① 本地直连（本包 `ENABLE_REALSENSE=ON` + SDK，延迟低）；② 用 `realsense2_camera` 节点发布 topic，本包以 `tracker_topic.launch.py` 订阅（无需 SDK，部署更简单）。
+
+### 验证
+
+```bash
+ros2 interface show kfs_tracker/msg/KFSDetection     # 查看消息字段
+ros2 topic echo /kfs_tracker/detection               # 观察检测结果
+ros2 topic hz /kfs_tracker/detection                 # 推理吞吐
+rqt_image_view /kfs_tracker/annotated_image          # 观察标注图
+
+# ABI 健康检查：应只链到一份 OpenCV
+ldd install/kfs_tracker/lib/kfs_tracker/kfs_tracker_node | grep -i opencv
+```
+
+### CLI 回归（确保封装未破坏原行为）
+
+```bash
+ros2 run kfs_tracker kfs_tracker --camera_type opencv --model_type heatmap
+```
+
+---
+
 ## 许可证
 
 本项目仅供 Robocon 比赛使用。

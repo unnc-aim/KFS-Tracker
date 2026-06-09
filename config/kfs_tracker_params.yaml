@@ -1,0 +1,32 @@
+# kfs_tracker_node 参数默认值（可通过 launch 的 parameters=[<此文件>] 整体注入）
+# 顶层键必须与节点名一致：kfs_tracker_node
+kfs_tracker_node:
+  ros__parameters:
+    # ---- 通用 ----
+    input_source: "topic"        # "local" | "topic"
+    model_type: "heatmap"        # "heatmap"（角点）| "bbox"
+    input_size: 300
+    display_ui: false            # true: 本地 cv::imshow（headless 部署保持 false）
+    publish_annotated: true      # true: 发布标注图到 annotated_topic
+    frame_id: "kfs_camera"
+    # model / classifier_model 留空则自动用 share/model 下默认模型
+
+    # ---- topic 输入模式 ----
+    image_topic: "/camera/color/image_raw"
+    camera_info_topic: "/camera/color/camera_info"
+    depth_topic: "/camera/aligned_depth_to_color/image_raw"
+    use_compressed: false        # true: 订 CompressedImage；false: 订 raw Image
+    use_depth: false             # true: 同步订 depth（RGB-D，携带 center_distance_m）
+
+    # ---- local 输入模式 ----
+    camera_type: "opencv"        # opencv | realsense | file
+    camera_index: 0
+    video_path: ""
+    intrinsics_path: ""
+    frame_width: 1280
+    frame_height: 720
+    grab_fps: 30.0
+
+    # ---- 输出话题（绝对名，对齐 workspace 约定）----
+    detection_topic: "/kfs_tracker/detection"
+    annotated_topic: "/kfs_tracker/annotated_image"

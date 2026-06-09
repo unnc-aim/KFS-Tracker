@@ -2,6 +2,7 @@
 #include "camera_provider.h"
 #include "heatmap_classifier_infer.h"
 #include "heatmap_tracking_classify.h"
+#include "infer_pipeline.h"
 #include <opencv2/opencv.hpp>
 
 #include <cstdlib>
@@ -24,113 +25,42 @@ static std::string getArgValue(int argc, char** argv, const std::string& key, co
 // 检查环境变量 DISABLE_RENDERER，默认弹窗渲染
 static bool shouldRenderOutput()
 {
-    const char *env = std::getenv("DISABLE_RENDERER");
+    const char* env = std::getenv("DISABLE_RENDERER");
     if (env == nullptr)
         return true;
     std::string val(env);
     return val.empty() || val == "0" || val == "false" || val == "FALSE";
 }
 
-// 推理器 variant 类型
-using Predictor = std::variant<tracker::BboxTrackingClassifier, tracker::HeatmapTrackingClassifier>;
-
-// 单帧推理结果输出到 stdout（真实推理耗时 + 理论帧率）
-static void printInferenceResult(const tracker::BboxClassificationResult &result, int frameIndex, double inferMs)
+// 单帧推理结果输出到 stdout（真实推理耗时 + 理论帧率 + 定位结果）
+static void printInferenceResult(const kfs::InferOutput& out, int frameIndex)
 {
-    double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
-    if (!result.valid)
+    double inferFps = out.inferMs > 0.0 ? 1000.0 / out.inferMs : 0.0;
+    std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", out.inferMs) << "ms"
+              << " (" << cv::format("%.1f", inferFps) << " fps)";
+    if (!out.valid)
     {
-        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
-                  << " (" << cv::format("%.1f", inferFps) << " fps)"
-                  << " | bbox invalid/empty." << std::endl;
+        std::cout << " | " << (out.isHeatmap ? "corners not detected." : "bbox invalid/empty.") << std::endl;
+    }
+    else if (out.isHeatmap)
+    {
+        std::cout << " | corners:";
+        for (size_t i = 0; i < 4; ++i)
+        {
+            std::cout << " (" << out.corners[i].x << "," << out.corners[i].y << ")";
+        }
+        std::cout << std::endl;
     }
     else
     {
         // 分类已由 ImageClassifierInfer(tracker_classifier.pt) 统一接管，此处仅输出 bbox 定位
-        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
-                  << " (" << cv::format("%.1f", inferFps) << " fps)"
-                  << " | bbox: " << result.bbox
-                  << std::endl;
+        std::cout << " | bbox: " << out.bbox << std::endl;
     }
-}
-
-static void printInferenceResult(const tracker::HeatmapTrackingResult &result, int frameIndex, double inferMs)
-{
-    double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
-    if (!result.valid)
-    {
-        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
-                  << " (" << cv::format("%.1f", inferFps) << " fps)"
-                  << " | corners not detected." << std::endl;
-    }
-    else
-    {
-        std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
-                  << " (" << cv::format("%.1f", inferFps) << " fps)"
-                  << " | corners:";
-        for (size_t i = 0; i < result.corners.size(); ++i)
-        {
-            std::cout << " (" << result.corners[i].x << "," << result.corners[i].y << ")";
-        }
-        std::cout << std::endl;
-    }
-}
-
-// 统一推理 + 计时 + 打印 + 返回标注图和耗时
-struct InferOutputWithTime {
-    bool valid = false;
-    cv::Mat annotated;
-    double inferMs = 0.0;
-};
-
-static InferOutputWithTime inferPrintAnnotated(Predictor &predictor, const cv::Mat &image,
-                                                int frameIndex) {
-    InferOutputWithTime out;
-    const double tickFreq = cv::getTickFrequency();
-
-    std::visit([&](auto &p) {
-        using T = std::decay_t<decltype(p)>;
-        int64_t t0 = cv::getTickCount();
-        if constexpr (std::is_same_v<T, tracker::BboxTrackingClassifier>) {
-            auto r = p.infer(image);
-            int64_t t1 = cv::getTickCount();
-            out.inferMs = static_cast<double>(t1 - t0) / tickFreq * 1000.0;
-            printInferenceResult(r, frameIndex, out.inferMs);
-            out.valid = r.valid;
-            out.annotated = r.annotated;
-        } else {
-            auto r = p.infer(image);
-            int64_t t1 = cv::getTickCount();
-            out.inferMs = static_cast<double>(t1 - t0) / tickFreq * 1000.0;
-            printInferenceResult(r, frameIndex, out.inferMs);
-            out.valid = r.valid;
-            out.annotated = r.annotated;
-        }
-    }, predictor);
-    return out;
-}
-
-// 分类结果统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
-static std::string formatClassification(const tracker::ClassifierInferResult &cls)
-{
-    if (!cls.valid)
-        return "class: N/A";
-    return "class: " + cls.className + " (id=" + std::to_string(cls.classId)
-           + ", p=" + cv::format("%.3f", cls.classScore) + ")";
-}
-
-// 在标注图左上角叠加分类文本
-static void drawClassification(cv::Mat &annotated, const std::string &clsText)
-{
-    if (annotated.empty())
-        return;
-    cv::putText(annotated, clsText, cv::Point(20, 40),
-                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
 }
 
 // 摄像头/视频流模式：通过 CameraProvider 抽象层采集帧
-static int runCamera(Predictor &predictor,
-                     tracker::ImageClassifierInfer &classifierInfer,
+static int runCamera(kfs::Predictor& predictor,
+                     tracker::ImageClassifierInfer& classifierInfer,
                      std::unique_ptr<camera::CameraProvider> provider,
                      bool render)
 {
@@ -156,16 +86,17 @@ static int runCamera(Predictor &predictor,
             break;
         }
 
-        // 推理 + 打印（内部计时）
-        auto inferOut = inferPrintAnnotated(predictor, bundle.color, frameIndex);
+        // 推理 + 打印（内部计时；单次推理，结果携带 corners/bbox）
+        auto inferOut = kfs::inferAnnotated(predictor, bundle.color);
         double inferMs = inferOut.inferMs;
         double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
         fps = fps * 0.9 + inferFps * 0.1;
+        printInferenceResult(inferOut, frameIndex);
 
         // 分类统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
         tracker::ClassifierInferResult clsResult = classifierInfer.infer(bundle.color);
-        std::string clsText = formatClassification(clsResult);
-        drawClassification(inferOut.annotated, clsText);
+        std::string clsText = kfs::formatClassification(clsResult);
+        kfs::drawClassification(inferOut.annotated, clsText);
         std::cout << "  " << clsText << std::endl;
 
         // bundle.intrinsics 后续可传给 CubeTracker3D / PlaneTracker2D 做位姿估计
@@ -205,10 +136,10 @@ static int runCamera(Predictor &predictor,
 }
 
 // 单图模式
-static int runImage(Predictor &predictor,
-                    tracker::ImageClassifierInfer &classifierInfer,
-                    const std::string &imagePath,
-                    const std::string &outputPath,
+static int runImage(kfs::Predictor& predictor,
+                    tracker::ImageClassifierInfer& classifierInfer,
+                    const std::string& imagePath,
+                    const std::string& outputPath,
                     bool render)
 {
     cv::Mat img = cv::imread(imagePath);
@@ -220,7 +151,7 @@ static int runImage(Predictor &predictor,
 
     // 推理（定位/角点）；分类统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
     cv::Mat annotated;
-    std::visit([&](auto &p) {
+    std::visit([&](auto& p) {
         using T = std::decay_t<decltype(p)>;
         if constexpr (std::is_same_v<T, tracker::BboxTrackingClassifier>) {
             tracker::BboxClassificationResult result = p.infer(img);
@@ -251,8 +182,8 @@ static int runImage(Predictor &predictor,
 
     // 分类（统一接管：bbox 与 heatmap 模式都走 tracker_classifier.pt）
     tracker::ClassifierInferResult clsResult = classifierInfer.infer(img);
-    std::string clsText = formatClassification(clsResult);
-    drawClassification(annotated, clsText);
+    std::string clsText = kfs::formatClassification(clsResult);
+    kfs::drawClassification(annotated, clsText);
     std::cout << "Classification: " << clsText << std::endl;
 
     cv::imwrite(outputPath, annotated);
@@ -273,7 +204,7 @@ static int runImage(Predictor &predictor,
 }
 
 // 从命令行参数构造 CameraConfig
-static camera::CameraConfig buildCameraConfig(int argc, char **argv)
+static camera::CameraConfig buildCameraConfig(int argc, char** argv)
 {
     camera::CameraConfig cfg;
     cfg.type = getArgValue(argc, argv, "--camera_type", "opencv");
@@ -285,7 +216,7 @@ static camera::CameraConfig buildCameraConfig(int argc, char **argv)
     return cfg;
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     try
     {
@@ -339,7 +270,7 @@ int main(int argc, char **argv)
         // 分类统一由 tracker_classifier.pt 接管（bbox / heatmap 模式共用）
         tracker::ImageClassifierInfer classifierInfer(classifierModelPath, inputSize);
 
-        Predictor predictor = [&]() -> Predictor {
+        kfs::Predictor predictor = [&]() -> kfs::Predictor {
             if (modelType == "heatmap") {
                 return tracker::HeatmapTrackingClassifier(modelPath, inputSize);
             }
@@ -365,12 +296,12 @@ int main(int argc, char **argv)
         std::string outputPath = getArgValue(argc, argv, "--output", "annotated.jpg");
         return runImage(predictor, classifierInfer, imagePath, outputPath, render);
     }
-    catch (const cv::Exception &e)
+    catch (const cv::Exception& e)
     {
         std::cerr << "[OpenCV][main] " << e.what() << std::endl;
         return -1;
     }
-    catch (const std::exception &e)
+    catch (const std::exception& e)
     {
         std::cerr << "[std::exception][main] " << e.what() << std::endl;
         return -1;
