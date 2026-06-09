@@ -1,5 +1,6 @@
 #include "bbox_tracking_classify.h"
 #include "camera_provider.h"
+#include "heatmap_classifier_infer.h"
 #include "heatmap_tracking_classify.h"
 #include <opencv2/opencv.hpp>
 
@@ -45,12 +46,10 @@ static void printInferenceResult(const tracker::BboxClassificationResult &result
     }
     else
     {
+        // 分类已由 ImageClassifierInfer(tracker_classifier.pt) 统一接管，此处仅输出 bbox 定位
         std::cout << "[frame " << frameIndex << "] infer: " << cv::format("%.1f", inferMs) << "ms"
                   << " (" << cv::format("%.1f", inferFps) << " fps)"
                   << " | bbox: " << result.bbox
-                  << " | class: " << result.className
-                  << " (id=" << result.classId
-                  << ", score=" << result.classScore << ")"
                   << std::endl;
     }
 }
@@ -111,8 +110,27 @@ static InferOutputWithTime inferPrintAnnotated(Predictor &predictor, const cv::M
     return out;
 }
 
+// 分类结果统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
+static std::string formatClassification(const tracker::ClassifierInferResult &cls)
+{
+    if (!cls.valid)
+        return "class: N/A";
+    return "class: " + cls.className + " (id=" + std::to_string(cls.classId)
+           + ", p=" + cv::format("%.3f", cls.classScore) + ")";
+}
+
+// 在标注图左上角叠加分类文本
+static void drawClassification(cv::Mat &annotated, const std::string &clsText)
+{
+    if (annotated.empty())
+        return;
+    cv::putText(annotated, clsText, cv::Point(20, 40),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
+}
+
 // 摄像头/视频流模式：通过 CameraProvider 抽象层采集帧
 static int runCamera(Predictor &predictor,
+                     tracker::ImageClassifierInfer &classifierInfer,
                      std::unique_ptr<camera::CameraProvider> provider,
                      bool render)
 {
@@ -143,6 +161,12 @@ static int runCamera(Predictor &predictor,
         double inferMs = inferOut.inferMs;
         double inferFps = inferMs > 0.0 ? 1000.0 / inferMs : 0.0;
         fps = fps * 0.9 + inferFps * 0.1;
+
+        // 分类统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
+        tracker::ClassifierInferResult clsResult = classifierInfer.infer(bundle.color);
+        std::string clsText = formatClassification(clsResult);
+        drawClassification(inferOut.annotated, clsText);
+        std::cout << "  " << clsText << std::endl;
 
         // bundle.intrinsics 后续可传给 CubeTracker3D / PlaneTracker2D 做位姿估计
 
@@ -182,6 +206,7 @@ static int runCamera(Predictor &predictor,
 
 // 单图模式
 static int runImage(Predictor &predictor,
+                    tracker::ImageClassifierInfer &classifierInfer,
                     const std::string &imagePath,
                     const std::string &outputPath,
                     bool render)
@@ -193,7 +218,8 @@ static int runImage(Predictor &predictor,
         return -1;
     }
 
-    // 打印推理结果
+    // 推理（定位/角点）；分类统一由 ImageClassifierInfer(tracker_classifier.pt) 接管
+    cv::Mat annotated;
     std::visit([&](auto &p) {
         using T = std::decay_t<decltype(p)>;
         if constexpr (std::is_same_v<T, tracker::BboxTrackingClassifier>) {
@@ -206,9 +232,7 @@ static int runImage(Predictor &predictor,
                     std::cout << "  [" << i << "] " << result.bboxContour[i] << std::endl;
                 }
             }
-            std::cout << "Classification: " << result.className << " (id=" << result.classId
-                      << ", score=" << result.classScore << ")" << std::endl;
-            cv::imwrite(outputPath, result.annotated);
+            annotated = result.annotated;
         } else {
             tracker::HeatmapTrackingResult result = p.infer(img);
             if (!result.valid) {
@@ -221,10 +245,17 @@ static int runImage(Predictor &predictor,
                               << ", " << result.corners[i].y << ")" << std::endl;
                 }
             }
-            cv::imwrite(outputPath, result.annotated);
+            annotated = result.annotated;
         }
     }, predictor);
 
+    // 分类（统一接管：bbox 与 heatmap 模式都走 tracker_classifier.pt）
+    tracker::ClassifierInferResult clsResult = classifierInfer.infer(img);
+    std::string clsText = formatClassification(clsResult);
+    drawClassification(annotated, clsText);
+    std::cout << "Classification: " << clsText << std::endl;
+
+    cv::imwrite(outputPath, annotated);
     std::cout << "Saved: " << outputPath << std::endl;
 
     if (render)
@@ -284,10 +315,11 @@ int main(int argc, char **argv)
                       << "  --height <int>          Desired frame height (default: 720)\n"
                       << "\n"
                       << "Inference options:\n"
-                      << "  --model_type <type>     Model type: bbox | heatmap (default: bbox)\n"
+                      << "  --model_type <type>     Model type: heatmap | bbox (default: heatmap)\n"
                       << "  --output <path>         Output annotated image path (default: annotated.jpg)\n"
-                      << "  --model <path>          Model file path (default: model/tracker_localizer.pt)\n"
+                      << "  --model <path>          Model file path (default follows --model_type)\n"
                       << "  --input_size <int>      Model input size (default: 300)\n"
+                      << "  --classifier_model <path> Classifier model (default: model/tracker_classifier.pt)\n"
                       << "\n"
                       << "Environment:\n"
                       << "  DISABLE_RENDERER=1      Suppress OpenCV GUI window\n";
@@ -295,9 +327,17 @@ int main(int argc, char **argv)
         }
 
         bool render = shouldRenderOutput();
-        std::string modelType = getArgValue(argc, argv, "--model_type", "bbox");
-        std::string modelPath = getArgValue(argc, argv, "--model", "model/tracker_localizer.pt");
+        std::string modelType = getArgValue(argc, argv, "--model_type", "heatmap");
+        // 默认模型路径跟随 modelType：heatmap 用角点热力图模型，bbox 用回归模型
+        std::string defaultModelPath = (modelType == "heatmap")
+            ? "model/corner_heatmap_localizer.pt"
+            : "model/tracker_localizer.pt";
+        std::string modelPath = getArgValue(argc, argv, "--model", defaultModelPath);
+        std::string classifierModelPath = getArgValue(argc, argv, "--classifier_model", "model/tracker_classifier.pt");
         int inputSize = std::stoi(getArgValue(argc, argv, "--input_size", "300"));
+
+        // 分类统一由 tracker_classifier.pt 接管（bbox / heatmap 模式共用）
+        tracker::ImageClassifierInfer classifierInfer(classifierModelPath, inputSize);
 
         Predictor predictor = [&]() -> Predictor {
             if (modelType == "heatmap") {
@@ -317,13 +357,13 @@ int main(int argc, char **argv)
             {
                 return -1;
             }
-            return runCamera(predictor, std::move(provider), render);
+            return runCamera(predictor, classifierInfer, std::move(provider), render);
         }
 
         // 单图模式
         std::string imagePath = getArgValue(argc, argv, "--image", "image.jpg");
         std::string outputPath = getArgValue(argc, argv, "--output", "annotated.jpg");
-        return runImage(predictor, imagePath, outputPath, render);
+        return runImage(predictor, classifierInfer, imagePath, outputPath, render);
     }
     catch (const cv::Exception &e)
     {
