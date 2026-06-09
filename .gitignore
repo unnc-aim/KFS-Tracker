@@ -6,3 +6,7 @@ data/
 *.pth
 uv/
 build_temp/
+
+.DS_Store
+
+deps/
