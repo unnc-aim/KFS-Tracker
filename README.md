@@ -6,8 +6,10 @@ Robocon 场景下的 KFS 目标追踪系统。基于 C++17 + OpenCV + LibTorch �
 
 | 模块 | 功能 |
 |------|------|
-| **BboxTrackingClassifier** | 基于 LibTorch 的目标检测 + 32 类分类（EfficientNet-B3 双头） |
-| **HeatmapTrackingClassifier** | 基于 U-Net 的角点热力图检测（4 通道高斯热力图 → argmax 解码角点） |
+| **BboxTrackingClassifier** | 基于 LibTorch 的目标检测（Bbox 定位，EfficientNet-B3 回归头） |
+| **HeatmapTrackingClassifier** | 基于 U-Net 的角点热力图检测（4 通道高斯热力图 → argmax 解码角点，单体式含可视化） |
+| **ImageClassifierInfer** | 独立图像分类（`tracker_classifier.pt`），统一负责 bbox / heatmap 模式的分类输出 |
+| **HeatmapCornerInfer** | 拆分式角点热力图推理（仅输出 4 个角点，配合 `PlaneTracker2D` 做位姿估计） |
 | **CubeTracker3D** | 立方体 3D 位姿估计：颜色分割 → 六边形轮廓拟合 → 消失点分析 → 6 点 PnP |
 | **PlaneTracker2D** | 平面四边形 2D 位姿估计：颜色分割 → 四边形检测 → solvePnP |
 | **CameraProvider** | 统一相机抽象层，支持 OpenCV 摄像头 / RealSense / 标定文件三种模式 |
@@ -25,14 +27,17 @@ KFS-Tracker/
 │   ├── pose_estimation_requirements.md    # 3D 立方体位姿估计需求文档
 │   └── corner_point_heatmap_requirements.md # 角点热力图检测需求文档
 ├── model/
-│   ├── tracker_localizer.pt    # Bbox 回归 + 分类模型（TorchScript, ~45MB）
-│   └── corner_heatmap_localizer.pt # 角点热力图模型（TorchScript, ~51MB）
+│   ├── tracker_localizer.pt        # Bbox 回归模型（TorchScript, ~45MB）
+│   ├── tracker_classifier.pt       # 图像分类模型（TorchScript, ~16MB；统一负责分类）
+│   ├── corner_heatmap_localizer.pt # 角点热力图模型（TorchScript, ~51MB）
+│   └── corner_point_localizer.pt   # 角点定位模型（TorchScript, ~45MB）
 ├── src/
 │   ├── main.cpp                # 入口：CLI 解析、CameraProvider 初始化、推理循环
-│   ├── bbox_tracking_classify.h/cpp  # Bbox 检测 + 分类推理
-│   ├── heatmap_tracking_classify.h/cpp # 热力图角点检测推理
+│   ├── bbox_tracking_classify.h/cpp  # Bbox 检测推理
+│   ├── heatmap_tracking_classify.h/cpp # 热力图角点检测推理（单体式，含可视化）
+│   ├── heatmap_classifier_infer.h/cpp # 拆分式推理：HeatmapCornerInfer + ImageClassifierInfer
 │   ├── tracker.h/cpp           # CubeTracker3D 实现
-│   ├── 2D_tracker.h/cpp        # PlaneTracker2D 实现
+│   ├── 2D_tracker.h/cpp        # PlaneTracker2D 实现（2D 位姿估计）
 │   ├── camera_provider.h       # 相机抽象接口 + Intrinsics/FrameBundle 定义
 │   ├── camera_provider.cpp     # 工厂函数 + 内参加载
 │   ├── camera_provider_opencv.cpp  # OpenCV 摄像头 + 文件模式实现
@@ -98,11 +103,14 @@ cmake --build .
 ### 摄像头实时推理
 
 ```bash
-# 默认 bbox 模式（Bbox 检测 + 32 类分类）
+# 默认热力图角点检测模式（等效 --model model/corner_heatmap_localizer.pt --model_type heatmap）
 ./build/kfs_tracker --camera_type opencv
 
-# 热力图角点检测模式
-./build/kfs_tracker --camera_type opencv --model model/corner_heatmap_localizer.pt --model_type heatmap
+# Bbox 检测模式
+./build/kfs_tracker --camera_type opencv --model model/tracker_localizer.pt --model_type bbox
+
+# 指定分类模型
+./build/kfs_tracker --camera_type opencv --classifier_model model/tracker_classifier.pt
 
 # 指定设备索引和分辨率
 ./build/kfs_tracker --camera_type opencv --camera_index 1 --width 640 --height 480
@@ -120,12 +128,12 @@ cmake --build .
 ### 单图推理
 
 ```bash
-# bbox 模式
-./build/kfs_tracker --image input.jpg --output annotated.jpg --model model/tracker_localizer.pt
+# 默认热力图角点检测模式
+./build/kfs_tracker --image input.jpg --output annotated.jpg
 
-# 热力图角点检测模式
+# Bbox 模式
 ./build/kfs_tracker --image input.jpg --output annotated.jpg \
-    --model model/corner_heatmap_localizer.pt --model_type heatmap
+    --model model/tracker_localizer.pt --model_type bbox
 ```
 
 ### 环境变量
@@ -144,10 +152,11 @@ cmake --build .
 | `--video` | — | 视频文件路径（`--camera_type file` 模式） |
 | `--width` | `1280` | 期望采集宽度 |
 | `--height` | `720` | 期望采集高度 |
-| `--model_type` | `bbox` | 模型类型：`bbox`（Bbox 检测 + 分类）/ `heatmap`（角点热力图检测） |
+| `--model_type` | `heatmap` | 模型类型：`heatmap`（角点热力图检测）/ `bbox`（Bbox 检测） |
 | `--image` | `image.jpg` | 单图模式输入路径 |
 | `--output` | `annotated.jpg` | 单图模式输出路径 |
-| `--model` | `model/tracker_localizer.pt` | TorchScript 模型路径 |
+| `--model` | 跟随 `--model_type` | 检测/角点模型路径（heatmap→`corner_heatmap_localizer.pt`，bbox→`tracker_localizer.pt`） |
+| `--classifier_model` | `model/tracker_classifier.pt` | 分类模型路径（bbox / heatmap 模式统一使用） |
 | `--input_size` | `300` | 模型输入尺寸 |
 
 ## 相机内参标定
@@ -176,33 +185,37 @@ distortion_coefficients: !!opencv-matrix
 
 ## 输出示例
 
-### Bbox 模式（`--model_type bbox`，默认）
+### Bbox 模式（`--model_type bbox`）
 
 流模式终端输出（推理耗时 + 理论帧率）：
 
 ```
-[frame 0] infer: 8.3ms (120.5 fps) | bbox: [100, 200, 300 x 200] | class: T_05 (id=4, score=0.92)
-[frame 1] infer: 7.9ms (126.6 fps) | bbox: [105, 198, 298 x 196] | class: T_05 (id=4, score=0.91)
+[frame 0] infer: 8.3ms (120.5 fps) | bbox: [100, 200, 300 x 200]
+  class: T_05 (id=4, p=0.920)
+[frame 1] infer: 7.9ms (126.6 fps) | bbox: [105, 198, 298 x 196]
+  class: T_05 (id=4, p=0.910)
 ```
 
 渲染窗口叠加层显示：
+- 左上角 `class: ...` — 分类结果（由 `tracker_classifier.pt` 统一给出）
 - `Infer: X.X ms` — 当前帧推理耗时
 - `Max FPS: X.X (EMA X.X)` — 理论最高帧率 + 指数移动平均
 
-### 热力图模式（`--model_type heatmap`）
+### 热力图模式（`--model_type heatmap`，默认）
 
-流模式终端输出：
+流模式终端输出（角点 + 由 `tracker_classifier.pt` 给出的分类）：
 
 ```
 [frame 0] infer: 12.5ms (80.0 fps) | corners: (320.5,180.2) (315.8,520.7) (790.3,515.1) (795.1,175.8)
-[frame 1] infer: 11.8ms (84.7 fps) | corners: (322.1,182.0) (317.3,518.5) (788.6,513.9) (793.8,178.3)
+  class: T_05 (id=4, p=0.901)
 ```
 
 渲染窗口叠加层显示：
 - 绿色四边形连线 + 4 个角点圆圈（红=TL、蓝=BL、青=BR、黄=TR）
 - `Heatmap: X.X ms` — 推理耗时
+- 左上角 `class: ...` — 分类结果（由 `tracker_classifier.pt` 统一给出）
 
-> **注意**：热力图模型仅输出 4 个角点坐标，不包含分类功能。如需分类，需配合其他分类模型使用。
+> **说明**：热力图模型本身只输出 4 个角点坐标；分类由独立的 `ImageClassifierInfer(tracker_classifier.pt)` 统一负责，与 bbox 模式共用同一分类模型。
 
 ## 许可证
 

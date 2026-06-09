@@ -78,8 +78,7 @@ void orderCorners(std::vector<cv::Point2f>& corners) {
 // ---- 可视化 ----
 void annotateResult(
     cv::Mat& img,
-    const std::vector<cv::Point2f>& corners,
-    double inferMs) {
+    const std::vector<cv::Point2f>& corners) {
     if (corners.size() != 4) return;
 
     // 画四边形连线
@@ -106,11 +105,7 @@ void annotateResult(
         cv::putText(img, names[i], pts[i] + cv::Point(6, -6),
                     cv::FONT_HERSHEY_SIMPLEX, 0.4, colors[i], 1);
     }
-
-    // 推理耗时文字
-    cv::putText(img, cv::format("Heatmap: %.1f ms", inferMs),
-                cv::Point(16, 32), cv::FONT_HERSHEY_SIMPLEX, 0.8,
-                cv::Scalar(50, 220, 50), 2);
+    // 推理耗时与分类文本统一由 main 绘制，此处仅保留角点几何标注。
 }
 
 }  // namespace
@@ -158,7 +153,7 @@ HeatmapTrackingResult HeatmapTrackingClassifier::infer(const cv::Mat& image) con
 
     // 可视化（不计时）
     result.annotated = image.clone();
-    annotateResult(result.annotated, result.corners, 0.0);
+    annotateResult(result.annotated, result.corners);
 
     return result;
 }

@@ -177,9 +177,8 @@ BboxClassificationResult BboxTrackingClassifier::infer(const cv::Mat& image) con
             cv::circle(result.annotated, p, 4, cv::Scalar(0, 255, 255), -1);
         }
     }
-    const std::string label =
-        "class: " + result.className + " (" + cv::format("id=%d, p=%.3f", result.classId, result.classScore) + ")";
-    cv::putText(result.annotated, label, cv::Point(16, 32), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(50, 220, 50), 2);
+    // 分类标注已移至 main，统一由 ImageClassifierInfer(tracker_classifier.pt) 绘制；
+    // 此处仅保留 bbox 矩形与角点圆点，不再绘制内置分类文本。
 
     return result;
 }
