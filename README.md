@@ -308,6 +308,16 @@ source install/setup.bash
 | `frame_width` / `frame_height` / `grab_fps` | 1280 / 720 / 30.0 | local 模式采集 |
 | `detection_topic` / `annotated_topic` | 见上 | 输出话题名（绝对名） |
 
+### Launch 文件速查
+
+| Launch | 输入 | 典型场景 |
+|--------|------|----------|
+| `tracker_local.launch.py` | OpenCV 摄像头 / 视频文件 | 笔记本摄像头调试、回放离线视频 |
+| `tracker_realsense.launch.py` | 直连 Intel RealSense RGB-D | 需 `ENABLE_REALSENSE=ON` 编译且设备已连接 |
+| `tracker_topic.launch.py` | 订阅 ROS 图像话题 | 已有相机节点发布图像流（最通用、部署首选） |
+
+三者均发布 `/kfs_tracker/detection`（`KFSDetection`）与 `/kfs_tracker/annotated_image`（标注图）。
+
 ### 启动示例
 
 ```bash
@@ -336,7 +346,27 @@ ros2 launch kfs_tracker tracker_local.launch.py camera_type:=file \
 ros2 launch kfs_tracker tracker_realsense.launch.py
 ```
 
-> RealSense 的两种路径：① 本地直连（本包 `ENABLE_REALSENSE=ON` + SDK，延迟低）；② 用 `realsense2_camera` 节点发布 topic，本包以 `tracker_topic.launch.py` 订阅（无需 SDK，部署更简单）。
+### RealSense 深度的两种路径
+
+无论哪种路径，深度都是用来填充 `KFSDetection.center_distance_m`（中心像素的 16UC1 mm 深度 ÷ 1000）；不开深度时该字段恒为 `-1.0`。
+
+> ⚠️ **关键**：`tracker_topic.launch.py` **默认 `use_depth:=false`，此时没有深度数据**（`center_distance_m=-1.0`）。要拿 RealSense 深度须显式开 `use_depth:=true`。
+
+| | `tracker_realsense.launch.py` | `tracker_topic.launch.py` + `use_depth:=true` |
+|------|------|------|
+| RealSense 接入 | 本包 `librealsense2` SDK **直连**设备 | 订阅 `realsense2_camera` 节点发布的 depth 话题 |
+| 本包是否要 `ENABLE_REALSENSE=ON` | **要** | 不要 |
+| 是否要装 RealSense SDK | 要 | 不要（由 `realsense2_camera` 节点负责） |
+| 延迟 | 低（SDK 直采） | 多一跳（经 ROS 话题） |
+| 内参来源 | SDK 自动获取 | `camera_info_topic` |
+| 深度默认行为 | 始终带 RGB-D | **默认关**，须手动 `use_depth:=true` |
+
+- **路径①（本地直连，延迟低）**：本包 `ENABLE_REALSENSE=ON` 编译 + librealsense2 已装 + 设备连接。
+- **路径②（部署首选，无需 SDK）**：用 `realsense2_camera` 节点发布 color + aligned_depth，本包以 `tracker_topic.launch.py` + `use_depth:=true` 订阅。`depth_topic` 默认即 `/camera/aligned_depth_to_color/image_raw`，故只需：
+
+  ```bash
+  ros2 launch kfs_tracker tracker_topic.launch.py use_depth:=true
+  ```
 
 ### 验证
 
