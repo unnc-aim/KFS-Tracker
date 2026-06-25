@@ -16,7 +16,7 @@ kfs_tracker_node:
     camera_info_topic: "/camera/color/camera_info"
     depth_topic: "/camera/aligned_depth_to_color/image_raw"
     use_compressed: false        # true: 订 CompressedImage；false: 订 raw Image
-    use_depth: false             # true: 同步订 depth（RGB-D，携带 center_distance_m）
+    use_depth: true             # true: 同步订 depth（RGB-D，携带 center_distance_m）
 
     # ---- local 输入模式 ----
     camera_type: "opencv"        # opencv | realsense | file
