@@ -10,3 +10,8 @@ build_temp/
 .DS_Store
 
 deps/
+
+install/
+log/
+logs/
+

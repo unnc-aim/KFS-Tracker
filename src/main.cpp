@@ -5,6 +5,10 @@
 #include "infer_pipeline.h"
 #include <opencv2/opencv.hpp>
 
+#ifdef ENABLE_REALSENSE
+#include <librealsense2/rs.hpp>
+#endif
+
 #include <cstdlib>
 #include <functional>
 #include <iostream>

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace camera {
 
@@ -33,11 +34,42 @@ Intrinsics convertIntrinsics(const rs2_intrinsics& intr) {
     return result;
 }
 
+// 枚举已连接的 RealSense 设备，返回序列号列表
+std::vector<std::string> enumerateSerialNumbers() {
+    std::vector<std::string> serials;
+    rs2::context ctx;
+    for (auto&& dev : ctx.query_devices()) {
+        serials.push_back(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+    }
+    return serials;
+}
+
 // RealSense 实现：通过 rs2::pipeline 采集对齐到彩色流的 color + depth 帧。
 class RealSenseCameraProvider : public CameraProvider {
 public:
-    RealSenseCameraProvider(int width, int height, int fps) {
-        // 启动 color + depth 两路流；后续在 grab() 中对齐到 color 帧
+    RealSenseCameraProvider(int width, int height, int fps, int cameraIndex) {
+        // 枚举设备，根据 cameraIndex 选择对应的序列号
+        auto serials = enumerateSerialNumbers();
+        if (serials.empty()) {
+            throw std::runtime_error("[RealSense] No device found.");
+        }
+        if (cameraIndex < 0 || cameraIndex >= static_cast<int>(serials.size())) {
+            std::cerr << "[RealSense] camera_index " << cameraIndex
+                      << " out of range (0.." << serials.size() - 1
+                      << "). Available devices:" << std::endl;
+            for (size_t i = 0; i < serials.size(); ++i) {
+                std::cerr << "  [" << i << "] serial: " << serials[i] << std::endl;
+            }
+            throw std::runtime_error("[RealSense] Invalid camera_index.");
+        }
+
+        std::string selectedSerial = serials[cameraIndex];
+        std::cout << "[RealSenseCameraProvider] Selecting camera_index=" << cameraIndex
+                  << " serial=" << selectedSerial
+                  << " (" << (cameraIndex + 1) << "/" << serials.size() << ")" << std::endl;
+
+        // 指定设备序列号 + 启动 color + depth 两路流
+        cfg_.enable_device(selectedSerial);
         cfg_.enable_stream(RS2_STREAM_COLOR, width, height, RS2_FORMAT_BGR8, fps);
         cfg_.enable_stream(RS2_STREAM_DEPTH, width, height, RS2_FORMAT_Z16, fps);
 
@@ -114,7 +146,7 @@ private:
 // 工厂入口（camera_provider.cpp 通过前向声明调用）
 std::unique_ptr<CameraProvider> makeRealSenseProvider(const CameraConfig& cfg) {
     const int fps = 30;
-    return std::make_unique<RealSenseCameraProvider>(cfg.width, cfg.height, fps);
+    return std::make_unique<RealSenseCameraProvider>(cfg.width, cfg.height, fps, cfg.cameraIndex);
 }
 
 }  // namespace camera
