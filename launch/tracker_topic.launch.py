@@ -14,6 +14,9 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+import os
+from ament_index_python.packages import get_package_share_directory
+
 
 def generate_launch_description():
     return LaunchDescription([
@@ -39,16 +42,11 @@ def generate_launch_description():
             executable='kfs_tracker_node',
             name='kfs_tracker_node',
             output='screen',
-            parameters=[{
-                'input_source': 'topic',
-                'image_topic': LaunchConfiguration('image_topic'),
-                'camera_info_topic': LaunchConfiguration('camera_info_topic'),
-                'depth_topic': LaunchConfiguration('depth_topic'),
-                'use_compressed': LaunchConfiguration('use_compressed'),
-                'use_depth': LaunchConfiguration('use_depth'),
-                'model_type': LaunchConfiguration('model_type'),
-                'display_ui': LaunchConfiguration('display_ui'),
-                'publish_annotated': LaunchConfiguration('publish_annotated'),
-            }],
+            parameters=[
+                # 所有参数从 yaml 读取，不在 launch 中覆盖
+                os.path.join(
+                    get_package_share_directory('kfs_tracker'),
+                    'config', 'kfs_tracker_params.yaml'),
+            ],
         ),
     ])

@@ -207,7 +207,7 @@ static int runImage(kfs::Predictor& predictor,
     return 0;
 }
 
-// 从命令行参数构造 CameraConfig
+//从命令行参数构造 CameraConfig
 static camera::CameraConfig buildCameraConfig(int argc, char** argv)
 {
     camera::CameraConfig cfg;

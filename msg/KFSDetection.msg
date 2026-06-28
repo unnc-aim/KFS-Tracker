@@ -28,6 +28,12 @@ float32 class_score   # 0.0 ~ 1.0
 # 定位 / 角点模型推理耗时（不含分类模型）
 float32 infer_ms
 
+# ---- 筛选指标（heatmap 模式，用于下游判断结果质量）----
+# 热力图峰值置信度（4 角点最小值，sigmoid 后 0~1）；低于 ~0.3 通常无目标
+float32 min_confidence
+# 四边形最大边长 / 最小边长；过大说明角点不合理（某个角点飞了）
+float32 aspect_ratio
+
 # 目标中心 RGB-D 距离（米）；仅当输入带对齐深度图（16UC1 mm）时填写
 # -1.0 = 未提供深度
 float32 center_distance_m

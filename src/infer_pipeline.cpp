@@ -24,6 +24,8 @@ InferOutput inferAnnotated(Predictor &predictor, const cv::Mat &image) {
                 for (size_t i = 0; i < r.corners.size() && i < out.corners.size(); ++i) {
                     out.corners[i] = r.corners[i];
                 }
+                out.minConfidence = r.minConfidence;
+                out.aspectRatio = r.aspectRatio;
             } else {
                 out.isHeatmap = false;
                 out.bbox = r.bbox;
