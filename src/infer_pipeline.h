@@ -27,6 +27,8 @@ struct InferOutput {
     bool isHeatmap = false;                 // 区分定位结果取 corners 还是 bbox
     cv::Rect bbox;                          // bbox 模式有效
     std::array<cv::Point2f, 4> corners{};   // heatmap 模式有效（TL, BL, BR, TR）
+    float minConfidence = 0.0f;             // heatmap: 4 角点热力图峰值最小值
+    float aspectRatio = 0.0f;               // heatmap: 四边形最大边/最小边
 };
 
 // 单次推理 + 计时，返回标注图与定位结果（不向 stdout 打印）。

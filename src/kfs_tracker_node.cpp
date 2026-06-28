@@ -67,6 +67,12 @@ public:
     declare_parameter<double>("grab_fps", 30.0);
     declare_parameter<std::string>("detection_topic", "/kfs_tracker/detection");
     declare_parameter<std::string>("annotated_topic", "/kfs_tracker/annotated_image");
+    declare_parameter<std::string>("color_topic", "/kfs_tracker/color/image_raw");
+    declare_parameter<std::string>("depth_out_topic", "/kfs_tracker/depth/image_raw");
+    declare_parameter<std::string>("camera_info_out_topic", "/kfs_tracker/camera_info");
+    declare_parameter<bool>("publish_color", true);
+    declare_parameter<bool>("publish_depth", true);
+    declare_parameter<bool>("publish_camera_info", true);
 
     // ---- 推理器 ----
     initPredictor();
@@ -74,9 +80,21 @@ public:
     // ---- 发布器 ----
     const std::string det_topic = get_parameter("detection_topic").as_string();
     const std::string ann_topic = get_parameter("annotated_topic").as_string();
+    const std::string color_out_topic = get_parameter("color_topic").as_string();
+    const std::string depth_out_topic = get_parameter("depth_out_topic").as_string();
+    const std::string info_out_topic = get_parameter("camera_info_out_topic").as_string();
     det_pub_ = create_publisher<kfs_tracker::msg::KFSDetection>(det_topic, 10);
     if (publish_annotated_) {
       annotated_pub_ = create_publisher<sensor_msgs::msg::Image>(ann_topic, rclcpp::SensorDataQoS());
+    }
+    if (get_parameter("publish_color").as_bool()) {
+      color_pub_ = create_publisher<sensor_msgs::msg::Image>(color_out_topic, rclcpp::SensorDataQoS());
+    }
+    if (get_parameter("publish_depth").as_bool()) {
+      depth_pub_ = create_publisher<sensor_msgs::msg::Image>(depth_out_topic, rclcpp::SensorDataQoS());
+    }
+    if (get_parameter("publish_camera_info").as_bool()) {
+      info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(info_out_topic, 10);
     }
 
     // ---- 输入源接线 ----
@@ -108,7 +126,7 @@ private:
 
   // ==================== 统一帧处理：两条输入路径都汇到这里 ====================
   void processFrame(const cv::Mat& color, const cv::Mat& depth,
-                    const camera::Intrinsics& /*intr*/,
+                    const camera::Intrinsics& intr,
                     const rclcpp::Time& stamp, const std::string& frame_id) {
     if (color.empty()) return;
 
@@ -129,6 +147,8 @@ private:
     msg.class_name = cls.className;
     msg.class_score = cls.classScore;
     msg.infer_ms = static_cast<float>(out.inferMs);
+    msg.min_confidence = out.minConfidence;
+    msg.aspect_ratio = out.aspectRatio;
 
     float cx = 0.f, cy = 0.f;
     if (out.isHeatmap && out.valid) {
@@ -153,26 +173,101 @@ private:
       cy = out.bbox.y + out.bbox.height * 0.5f;
     }
 
-    // 4. 中心距离（仅当输入带 16UC1 mm 深度图）
+    // 4. 中心距离：取目标 bbox 内有效深度的中值（比单像素稳定得多）
     msg.center_distance_m = -1.0f;
     if (out.valid && !depth.empty() && depth.type() == CV_16U) {
-      const int ix = static_cast<int>(cx), iy = static_cast<int>(cy);
-      if (ix >= 0 && iy >= 0 && ix < depth.cols && iy < depth.rows) {
-        const uint16_t mm = depth.at<uint16_t>(iy, ix);
-        if (mm != 0) msg.center_distance_m = mm / 1000.0f;
+      // 调试：打印分辨率对比
+      RCLCPP_DEBUG(get_logger(),
+        "depth %dx%d vs color %dx%d, bbox(%.0f,%.0f)-(%.0f,%.0f)",
+        depth.cols, depth.rows, color.cols, color.rows,
+        msg.bbox_min.x, msg.bbox_min.y, msg.bbox_max.x, msg.bbox_max.y);
+
+      // 取目标区域 ROI（收缩到中心 60% 避免边缘噪声）
+      const float roi_ratio = 0.6f;
+      float roi_w = (msg.bbox_max.x - msg.bbox_min.x) * roi_ratio;
+      float roi_h = (msg.bbox_max.y - msg.bbox_min.y) * roi_ratio;
+      float roi_cx = (msg.bbox_min.x + msg.bbox_max.x) * 0.5f;
+      float roi_cy = (msg.bbox_min.y + msg.bbox_max.y) * 0.5f;
+      int x0 = std::max(0, static_cast<int>(roi_cx - roi_w * 0.5f));
+      int y0 = std::max(0, static_cast<int>(roi_cy - roi_h * 0.5f));
+      int x1 = std::min(depth.cols, static_cast<int>(roi_cx + roi_w * 0.5f));
+      int y1 = std::min(depth.rows, static_cast<int>(roi_cy + roi_h * 0.5f));
+      if (x1 > x0 && y1 > y0) {
+        cv::Rect roi(x0, y0, x1 - x0, y1 - y0);
+        // 收集 ROI 内所有非零深度值
+        std::vector<uint16_t> vals;
+        for (int r = roi.y; r < roi.y + roi.height; ++r) {
+          const uint16_t* row = depth.ptr<uint16_t>(r);
+          for (int c = roi.x; c < roi.x + roi.width; ++c) {
+            if (row[c] != 0) vals.push_back(row[c]);
+          }
+        }
+        if (!vals.empty()) {
+          std::sort(vals.begin(), vals.end());
+          uint16_t median = vals[vals.size() / 2];
+          uint16_t p10 = vals[vals.size() / 10];       // 10 分位
+          uint16_t p90 = vals[vals.size() * 9 / 10];   // 90 分位
+          msg.center_distance_m = median / 1000.0f;
+          // 调试：打印深度分布
+          RCLCPP_INFO(get_logger(),
+            "depth ROI [%d,%d %dx%d] vals=%zu min=%.3f p10=%.3f med=%.3f p90=%.3f max=%.3f m",
+            roi.x, roi.y, roi.width, roi.height, vals.size(),
+            vals.front()/1000.0f, p10/1000.0f, median/1000.0f, p90/1000.0f, vals.back()/1000.0f);
+        }
       }
     }
 
     det_pub_->publish(msg);
 
-    // 5. 可选标注图发布（OpenCV UI → topic）
+    // 5. 发布原始彩色图
+    if (color_pub_ && !color.empty()) {
+      auto img_msg = cv_bridge::CvImage(msg.header, sensor_msgs::image_encodings::BGR8,
+                                        color).toImageMsg();
+      color_pub_->publish(*img_msg);
+    }
+
+    // 6. 发布深度图（16UC1 mm）
+    if (depth_pub_ && !depth.empty()) {
+      auto dep_msg = cv_bridge::CvImage(msg.header, sensor_msgs::image_encodings::TYPE_16UC1,
+                                        depth).toImageMsg();
+      depth_pub_->publish(*dep_msg);
+    }
+
+    // 7. 发布 CameraInfo（从内参构造）
+    if (info_pub_) {
+      sensor_msgs::msg::CameraInfo info_msg;
+      info_msg.header = msg.header;
+      info_msg.height = color.rows;
+      info_msg.width = color.cols;
+      info_msg.distortion_model = "plumb_bob";
+      const cv::Mat& K = intr.cameraMatrix;
+      const cv::Mat& D = intr.distCoeffs;
+      for (int i = 0; i < 9; ++i) info_msg.k[i] = K.at<double>(i);
+      for (int i = 0; i < D.cols && i < 5; ++i) info_msg.d.push_back(D.at<double>(i));
+      info_msg.p[0] = K.at<double>(0,0); info_msg.p[1] = 0; info_msg.p[2] = K.at<double>(0,2);
+      info_msg.p[5] = K.at<double>(1,1); info_msg.p[6] = K.at<double>(1,2); info_msg.p[10] = 1;
+      info_pub_->publish(info_msg);
+    }
+
+    // 8. 可选标注图发布（OpenCV UI → topic）
     if (publish_annotated_ && !out.annotated.empty()) {
+      // 在标注图上画目标中心点十字标记 + 距离
+      if (out.valid && cx > 0 && cy > 0) {
+        cv::Point cp(static_cast<int>(cx), static_cast<int>(cy));
+        cv::drawMarker(out.annotated, cp, cv::Scalar(0, 0, 255), cv::MARKER_CROSS, 20, 2);
+        if (msg.center_distance_m > 0) {
+          cv::putText(out.annotated,
+                      cv::format("%.3fm", msg.center_distance_m),
+                      cp + cv::Point(10, -10),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 255), 2);
+        }
+      }
       auto img_msg = cv_bridge::CvImage(msg.header, sensor_msgs::image_encodings::BGR8,
                                         out.annotated).toImageMsg();
       annotated_pub_->publish(*img_msg);
     }
 
-    // 6. 可选本地显示（display_ui）
+    // 9. 可选本地显示（display_ui）
     if (display_ui_ && !out.annotated.empty()) {
       cv::imshow("kfs_tracker_node", out.annotated);
       cv::waitKey(1);
@@ -335,6 +430,9 @@ private:
   // 发布
   rclcpp::Publisher<kfs_tracker::msg::KFSDetection>::SharedPtr det_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr annotated_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub_;
 
   // local 模式
   std::unique_ptr<camera::CameraProvider> provider_;

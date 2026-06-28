@@ -27,11 +27,13 @@ torch::Tensor imageToInputTensor(const cv::Mat& image, int inputSize) {
     return tensor.clone();
 }
 
-// ---- 热力图解码：对每个通道 argmax 得到归一化角点坐标 ----
+// ---- 热力图解码：对每个通道 argmax 得到归一化角点坐标 + 峰值置信度 ----
 // 输入: heatmaps (1, 4, H, W)
 // 输出: 4 个归一化角点 (x,y) ∈ [0,1]，顺序为 tl, bl, br, tr
+//       confidences: 每个角点通道的峰值（sigmoid 后的 0~1 值）
 std::vector<cv::Point2f> decodeCornersFromHeatmaps(
-    const torch::Tensor& heatmaps, int origW, int origH) {
+    const torch::Tensor& heatmaps, int origW, int origH,
+    std::vector<float>& confidences) {
     // heatmaps: (1, 4, H, W)
     const int c = heatmaps.size(1);
     const int h = heatmaps.size(2);
@@ -39,11 +41,20 @@ std::vector<cv::Point2f> decodeCornersFromHeatmaps(
 
     std::vector<cv::Point2f> corners;
     corners.reserve(static_cast<size_t>(c));
+    confidences.clear();
+    confidences.reserve(static_cast<size_t>(c));
 
     for (int ch = 0; ch < c; ++ch) {
         auto channel = heatmaps[0][ch];  // (H, W)
         auto flat = channel.reshape(-1);
-        int64_t idx = flat.argmax(0).item<int64_t>();
+        auto maxTuple = flat.max(0);
+        int64_t idx = std::get<1>(maxTuple).item<int64_t>();
+        float peakVal = std::get<0>(maxTuple).item<float>();
+
+        // 如果热力图未过 sigmoid，用 sigmoid 归一化到 [0,1]
+        float conf = 1.0f / (1.0f + std::exp(-peakVal));
+        confidences.push_back(conf);
+
         int64_t y = idx / w;
         int64_t x = idx % w;
 
@@ -54,6 +65,24 @@ std::vector<cv::Point2f> decodeCornersFromHeatmaps(
                              yNorm * static_cast<float>(origH));
     }
     return corners;
+}
+
+// ---- 几何合理性检查：计算四边形最大边长 / 最小边长 ----
+// 返回值 > 1.0；值越大说明角点越不合理（某个角点飞了）
+float computeAspectRatio(const std::vector<cv::Point2f>& corners) {
+    if (corners.size() != 4) return 9999.0f;
+    // corners 顺序: tl, bl, br, tr（排序后）
+    // 四条边: tl-bl, bl-br, br-tr, tr-tl
+    float edges[4];
+    edges[0] = static_cast<float>(cv::norm(corners[0] - corners[1])); // tl-bl
+    edges[1] = static_cast<float>(cv::norm(corners[1] - corners[2])); // bl-br
+    edges[2] = static_cast<float>(cv::norm(corners[2] - corners[3])); // br-tr
+    edges[3] = static_cast<float>(cv::norm(corners[3] - corners[0])); // tr-tl
+
+    float minE = *std::min_element(edges, edges + 4);
+    float maxE = *std::max_element(edges, edges + 4);
+    if (minE < 1.0f) return 9999.0f;  // 面积太小，不合理
+    return maxE / minE;
 }
 
 // ---- 角点排序：左上、左下、右下、右上 ----
@@ -144,12 +173,24 @@ HeatmapTrackingResult HeatmapTrackingClassifier::infer(const cv::Mat& image) con
     }
     torch::Tensor heatmaps = output.toTensor();
 
-    // 解码角点
-    auto corners = decodeCornersFromHeatmaps(heatmaps, image.cols, image.rows);
+    // 解码角点 + 置信度
+    std::vector<float> confidences;
+    auto corners = decodeCornersFromHeatmaps(heatmaps, image.cols, image.rows, confidences);
     orderCorners(corners);
 
-    result.valid = corners.size() == 4;
+    // ---- 筛选第一层：热力图峰值置信度 ----
+    // 4 个角点中最小的置信度低于阈值 → 判定无效
+    result.minConfidence = *std::min_element(confidences.begin(), confidences.end());
+    constexpr float kMinConfidence = 0.3f;  // sigmoid 后的阈值
+
+    // ---- 筛选第二层：几何合理性 ----
+    // 四边形最大边长 / 最小边长过大 → 某个角点飞了
+    result.aspectRatio = computeAspectRatio(corners);
+    constexpr float kMaxAspectRatio = 5.0f;
+
     result.corners = std::move(corners);
+    result.valid = (result.minConfidence >= kMinConfidence &&
+                    result.aspectRatio <= kMaxAspectRatio);
 
     // 可视化（不计时）
     result.annotated = image.clone();

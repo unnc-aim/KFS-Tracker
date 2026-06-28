@@ -3,7 +3,7 @@
 kfs_tracker_node:
   ros__parameters:
     # ---- 通用 ----
-    input_source: "topic"        # "local" | "topic"
+    input_source: "topic"        # "local" | "topic"（ROS 节点必须用 topic）
     model_type: "heatmap"        # "heatmap"（角点）| "bbox"
     input_size: 300
     display_ui: false            # true: 本地 cv::imshow（headless 部署保持 false）
@@ -19,7 +19,7 @@ kfs_tracker_node:
     use_depth: true             # true: 同步订 depth（RGB-D，携带 center_distance_m）
 
     # ---- local 输入模式 ----
-    camera_type: "opencv"        # opencv | realsense | file
+    camera_type: "realsense"        # opencv | realsense | file
     camera_index: 0
     video_path: ""
     intrinsics_path: ""
@@ -30,3 +30,9 @@ kfs_tracker_node:
     # ---- 输出话题（绝对名，对齐 workspace 约定）----
     detection_topic: "/kfs_tracker/detection"
     annotated_topic: "/kfs_tracker/annotated_image"
+    color_topic: "/kfs_tracker/color/image_raw"
+    depth_out_topic: "/kfs_tracker/depth/image_raw"
+    camera_info_out_topic: "/kfs_tracker/camera_info"
+    publish_color: true
+    publish_depth: true
+    publish_camera_info: true

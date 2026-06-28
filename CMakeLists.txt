@@ -49,6 +49,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 ament_export_dependencies(rosidl_default_runtime)
 
 # ==================== kfs_tracker_core 静态库（CLI 与节点共用）====================
+# 注意：RealSense provider 不放入 core，避免 librealsense2 的内部 DDS 符号
+# 与 ROS 2 的 fastrtps 冲突导致 kfs_tracker_node 崩溃。
+# RealSense provider 单独编译为 kfs_tracker_realsense 库，仅 CLI 链接。
 set(KFS_CORE_SOURCES
   src/tracker.cpp
   src/2D_tracker.cpp
@@ -59,9 +62,6 @@ set(KFS_CORE_SOURCES
   src/camera_provider_opencv.cpp
   src/infer_pipeline.cpp
 )
-if(ENABLE_REALSENSE)
-  list(APPEND KFS_CORE_SOURCES src/camera_provider_realsense.cpp)
-endif()
 
 add_library(kfs_tracker_core STATIC ${KFS_CORE_SOURCES})
 target_include_directories(kfs_tracker_core PUBLIC
@@ -76,10 +76,21 @@ target_link_libraries(kfs_tracker_core
   ${TORCH_LIBRARIES}
 )
 target_compile_definitions(kfs_tracker_core PUBLIC _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
+# ENABLE_REALSENSE 定义为 PUBLIC，使 camera_provider.cpp 中的工厂函数
+# 能看到 realsense 分支（实际实现由 kfs_tracker_realsense 库提供）
 if(ENABLE_REALSENSE)
-  target_link_libraries(kfs_tracker_core ${realsense2_LIBRARY})
-  # PUBLIC：core 内 camera_provider.cpp 的 #ifdef ENABLE_REALSENSE 分发依赖此宏
   target_compile_definitions(kfs_tracker_core PUBLIC ENABLE_REALSENSE)
+endif()
+
+# ==================== RealSense provider 独立库（仅 CLI 使用）====================
+if(ENABLE_REALSENSE)
+  add_library(kfs_tracker_realsense STATIC src/camera_provider_realsense.cpp)
+  target_include_directories(kfs_tracker_realsense PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${OpenCV_INCLUDE_DIRS}
+  )
+  target_link_libraries(kfs_tracker_realsense ${realsense2_LIBRARY})
+  target_compile_definitions(kfs_tracker_realsense PUBLIC ENABLE_REALSENSE)
 endif()
 
 # ==================== CLI 可执行（原 kfs_tracker，无 ROS 依赖）====================
@@ -87,10 +98,21 @@ endif()
 # 因为 rosidl_generate_interfaces 已占用该名称，故改为 kfs_tracker_cli。
 add_executable(kfs_tracker_cli src/main.cpp)
 target_link_libraries(kfs_tracker_cli kfs_tracker_core)
+if(ENABLE_REALSENSE)
+  target_link_libraries(kfs_tracker_cli kfs_tracker_realsense)
+  target_compile_definitions(kfs_tracker_cli PRIVATE ENABLE_REALSENSE)
+endif()
 
 # ==================== ROS 节点可执行 ====================
 add_executable(kfs_tracker_node src/kfs_tracker_node.cpp)
 target_link_libraries(kfs_tracker_node kfs_tracker_core)
+# RealSense provider 也链接进节点（用于 local 模式直接操作硬件）。
+# 注意：librealsense2 内部捆绑的 FastDDS 符号会与 ROS 2 fastrtps 冲突，
+# 因此 systemd service 必须设置 RMW_IMPLEMENTATION=rmw_cyclonedds_cpp。
+if(ENABLE_REALSENSE)
+  target_link_libraries(kfs_tracker_node kfs_tracker_realsense)
+  target_compile_definitions(kfs_tracker_node PRIVATE ENABLE_REALSENSE)
+endif()
 ament_target_dependencies(kfs_tracker_node
   rclcpp
   std_msgs
