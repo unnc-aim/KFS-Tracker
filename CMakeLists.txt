@@ -15,8 +15,8 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# --- 可选 RealSense 支持 ---
-option(ENABLE_REALSENSE "Build with Intel RealSense camera support" OFF)
+# --- RealSense 支持（默认开启）---
+option(ENABLE_REALSENSE "Build with Intel RealSense camera support" ON)
 
 # ==================== ament / ROS 依赖 ====================
 find_package(ament_cmake REQUIRED)
@@ -69,24 +69,28 @@ target_include_directories(kfs_tracker_core PUBLIC
   ${OpenCV_INCLUDE_DIRS}
   ${TORCH_INCLUDE_DIRS}
 )
-target_link_libraries(kfs_tracker_core PUBLIC
+# 使用 plain 签名（无 PUBLIC/PRIVATE），以便下游 kfs_tracker_node 能用
+# ament_target_dependencies（也是 plain），避免 keyword/plain 冲突
+target_link_libraries(kfs_tracker_core
   ${OpenCV_LIBS}
   ${TORCH_LIBRARIES}
 )
 target_compile_definitions(kfs_tracker_core PUBLIC _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS)
 if(ENABLE_REALSENSE)
-  target_link_libraries(kfs_tracker_core PUBLIC ${realsense2_LIBRARY})
+  target_link_libraries(kfs_tracker_core ${realsense2_LIBRARY})
   # PUBLIC：core 内 camera_provider.cpp 的 #ifdef ENABLE_REALSENSE 分发依赖此宏
   target_compile_definitions(kfs_tracker_core PUBLIC ENABLE_REALSENSE)
 endif()
 
 # ==================== CLI 可执行（原 kfs_tracker，无 ROS 依赖）====================
-add_executable(kfs_tracker src/main.cpp)
-target_link_libraries(kfs_tracker PRIVATE kfs_tracker_core)
+# 注意：target 名不能与 ${PROJECT_NAME}（即 kfs_tracker）重名，
+# 因为 rosidl_generate_interfaces 已占用该名称，故改为 kfs_tracker_cli。
+add_executable(kfs_tracker_cli src/main.cpp)
+target_link_libraries(kfs_tracker_cli kfs_tracker_core)
 
 # ==================== ROS 节点可执行 ====================
 add_executable(kfs_tracker_node src/kfs_tracker_node.cpp)
-target_link_libraries(kfs_tracker_node PRIVATE kfs_tracker_core)
+target_link_libraries(kfs_tracker_node kfs_tracker_core)
 ament_target_dependencies(kfs_tracker_node
   rclcpp
   std_msgs
@@ -100,11 +104,12 @@ ament_target_dependencies(kfs_tracker_node
 # 不要把 ${PROJECT_NAME} 放进 ament_target_dependencies）
 rosidl_get_typesupport_target(kfs_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(kfs_tracker_node PRIVATE ${kfs_typesupport_target})
-add_dependencies(kfs_tracker_node ${${PROJECT_NAME}_EXPORTED_TARGETS})
+target_link_libraries(kfs_tracker_node ${kfs_typesupport_target})
+# 确保自定义消息先生成再编译节点
+add_dependencies(kfs_tracker_node ${PROJECT_NAME}__rosidl_generator_c)
 
 # ==================== 安装 ====================
-install(TARGETS kfs_tracker kfs_tracker_node
+install(TARGETS kfs_tracker_cli kfs_tracker_node
   DESTINATION lib/${PROJECT_NAME})
 
 # launch / config 整目录安装

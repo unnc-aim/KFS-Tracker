@@ -9,7 +9,7 @@
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/image_encodings.hpp>
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
@@ -169,7 +169,7 @@ private:
     if (publish_annotated_ && !out.annotated.empty()) {
       auto img_msg = cv_bridge::CvImage(msg.header, sensor_msgs::image_encodings::BGR8,
                                         out.annotated).toImageMsg();
-      annotated_pub_->publish(std::move(img_msg));
+      annotated_pub_->publish(*img_msg);
     }
 
     // 6. 可选本地显示（display_ui）
