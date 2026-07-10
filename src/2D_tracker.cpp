@@ -81,7 +81,6 @@ PlaneTracker2DResult PlaneTracker2D::detect(const cv::Mat& input, const std::str
         result.reprojectionError = computeReprojectionError(objectPoints, imagePoints, result.rvec, result.tvec);
         if (!std::isfinite(result.reprojectionError) || result.reprojectionError > maxReprojectionErrorPx_) {
             result.annotated = drawAnnotation(input, candidate.contour, candidate.corners, cv::Vec3d(), cv::Vec3d(), -1.0);
-            result.reprojectionError = -1.0;
             return result;
         }
         result.annotated = drawAnnotation(input,
@@ -135,7 +134,6 @@ PlaneTracker2DResult PlaneTracker2D::detectFromCorners(const cv::Mat& input, con
         result.reprojectionError = computeReprojectionError(objectPoints, imagePoints, result.rvec, result.tvec);
         if (!std::isfinite(result.reprojectionError) || result.reprojectionError > maxReprojectionErrorPx_) {
             result.annotated = drawAnnotation(input, {}, corners, cv::Vec3d(), cv::Vec3d(), -1.0);
-            result.reprojectionError = -1.0;
             return result;
         }
 

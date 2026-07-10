@@ -30,7 +30,9 @@
 #include "heatmap_classifier_infer.h"
 #include "heatmap_tracking_classify.h"
 #include "infer_pipeline.h"
+#include "kfs_presence_detector.h"
 #include "kfs_tracker/msg/kfs_detection.hpp"
+#include "kfs_tracker/srv/check_kfs_presence.hpp"
 
 class KFSTrackerNode : public rclcpp::Node {
 public:
@@ -49,6 +51,8 @@ public:
         ? "/model/corner_heatmap_localizer.pt"
         : "/model/tracker_localizer.pt");
     model_path_   = declare_parameter<std::string>("model", default_model);
+    presence_model_path_ =
+        declare_parameter<std::string>("presence_model", share + "/model/corner_heatmap_localizer.pt");
     classifier_model_path_ =
         declare_parameter<std::string>("classifier_model", share + "/model/tracker_classifier.pt");
 
@@ -67,6 +71,7 @@ public:
     declare_parameter<double>("grab_fps", 30.0);
     declare_parameter<std::string>("detection_topic", "/kfs_tracker/detection");
     declare_parameter<std::string>("annotated_topic", "/kfs_tracker/annotated_image");
+    declare_parameter<std::string>("presence_service", "/kfs_tracker/check_presence");
     declare_parameter<std::string>("color_topic", "/kfs_tracker/color/image_raw");
     declare_parameter<std::string>("depth_out_topic", "/kfs_tracker/depth/image_raw");
     declare_parameter<std::string>("camera_info_out_topic", "/kfs_tracker/camera_info");
@@ -80,6 +85,7 @@ public:
     // ---- 发布器 ----
     const std::string det_topic = get_parameter("detection_topic").as_string();
     const std::string ann_topic = get_parameter("annotated_topic").as_string();
+    const std::string presence_service = get_parameter("presence_service").as_string();
     const std::string color_out_topic = get_parameter("color_topic").as_string();
     const std::string depth_out_topic = get_parameter("depth_out_topic").as_string();
     const std::string info_out_topic = get_parameter("camera_info_out_topic").as_string();
@@ -96,6 +102,12 @@ public:
     if (get_parameter("publish_camera_info").as_bool()) {
       info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>(info_out_topic, 10);
     }
+    presence_srv_ = create_service<kfs_tracker::srv::CheckKFSPresence>(
+        presence_service,
+        std::bind(&KFSTrackerNode::onCheckPresence,
+                  this,
+                  std::placeholders::_1,
+                  std::placeholders::_2));
 
     // ---- 输入源接线 ----
     if (input_source_ == "local") {
@@ -115,6 +127,8 @@ private:
   void initPredictor() {
     classifierInfer_ =
         std::make_unique<tracker::ImageClassifierInfer>(classifier_model_path_, input_size_);
+    presenceTracker_ =
+        std::make_unique<tracker::HeatmapTrackingClassifier>(presence_model_path_, input_size_);
     if (model_type_ == "heatmap") {
       predictor_ = std::make_unique<kfs::Predictor>(
           std::in_place_type<tracker::HeatmapTrackingClassifier>, model_path_, input_size_);
@@ -129,6 +143,13 @@ private:
                     const camera::Intrinsics& intr,
                     const rclcpp::Time& stamp, const std::string& frame_id) {
     if (color.empty()) return;
+
+    latest_frame_.color = color.clone();
+    latest_frame_.depth = depth.clone();
+    latest_frame_.intrinsics.cameraMatrix = intr.cameraMatrix.clone();
+    latest_frame_.intrinsics.distCoeffs = intr.distCoeffs.clone();
+    latest_frame_stamp_ = stamp;
+    latest_frame_id_ = frame_id;
 
     // 1. 定位 / 角点推理（单次，携带 corners/bbox，避免二次推理）
     auto out = kfs::inferAnnotated(*predictor_, color);
@@ -274,6 +295,54 @@ private:
     }
   }
 
+  // ==================== KFS 存在性 service ====================
+  void onCheckPresence(
+      const std::shared_ptr<kfs_tracker::srv::CheckKFSPresence::Request> request,
+      std::shared_ptr<kfs_tracker::srv::CheckKFSPresence::Response> response) {
+    (void)request;
+
+    if (latest_frame_.color.empty()) {
+      response->has_kfs_cube = false;
+      response->frame_available = false;
+      response->heatmap_valid = false;
+      response->pose_solved = false;
+      response->depth_valid = false;
+      response->reprojection_error = -1.0;
+      response->average_plane_distance_m = -1.0;
+      response->valid_depth_samples = 0;
+      response->message = "no frame available yet";
+      return;
+    }
+
+    tracker::KFSPresenceCheckConfig config;
+    const auto result = tracker::checkKfsCubeInFrame(latest_frame_, *presenceTracker_, config);
+
+    response->has_kfs_cube = result.hasKfsCube;
+    response->frame_available = result.frameCaptured;
+    response->heatmap_valid = result.heatmapValid;
+    response->pose_solved = result.poseSolved;
+    response->depth_valid = result.depthValid;
+    response->reprojection_error = result.reprojectionError;
+    response->average_plane_distance_m = result.averagePlaneDistanceM;
+    response->valid_depth_samples = result.validDepthSamples;
+
+    if (!result.frameCaptured) {
+      response->message = "no frame available";
+    } else if (!result.heatmapValid) {
+      response->message = "heatmap corners invalid";
+    } else if (result.reprojectionError < 0.0) {
+      response->message = "pose reprojection unavailable";
+    } else if (result.reprojectionError > config.reprojectionErrorThresholdPx) {
+      response->message = "reprojection loss too high";
+    } else if (!result.depthValid) {
+      response->message = "depth unavailable or no valid depth samples inside tracked plane";
+    } else if (!result.hasKfsCube) {
+      response->message = "tracked plane is outside nearest distance range";
+    } else {
+      response->message = "kfs cube present";
+    }
+  }
+
   // ==================== topic 输入模式 ====================
   void initTopicSubscribers() {
     const std::string image_topic = get_parameter("image_topic").as_string();
@@ -415,12 +484,17 @@ private:
   // 推理
   std::unique_ptr<kfs::Predictor> predictor_;
   std::unique_ptr<tracker::ImageClassifierInfer> classifierInfer_;
+  std::unique_ptr<tracker::HeatmapTrackingClassifier> presenceTracker_;
   camera::Intrinsics latest_intrinsics_{};
+  camera::FrameBundle latest_frame_;
+  rclcpp::Time latest_frame_stamp_;
+  std::string latest_frame_id_;
 
   // 通用配置
   std::string input_source_;
   std::string model_type_;
   std::string model_path_;
+  std::string presence_model_path_;
   std::string classifier_model_path_;
   std::string frame_id_;
   int input_size_ = 300;
@@ -433,6 +507,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr color_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr info_pub_;
+  rclcpp::Service<kfs_tracker::srv::CheckKFSPresence>::SharedPtr presence_srv_;
 
   // local 模式
   std::unique_ptr<camera::CameraProvider> provider_;

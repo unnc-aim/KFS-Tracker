@@ -26,6 +26,8 @@ def generate_launch_description():
                               description='heatmap（角点）| bbox'),
         DeclareLaunchArgument('display_ui', default_value='true'),
         DeclareLaunchArgument('publish_annotated', default_value='true'),
+        DeclareLaunchArgument('presence_service', default_value='/kfs_tracker/check_presence',
+                              description='KFS 近点存在性检测 service 名'),
         Node(
             package='kfs_tracker',
             executable='kfs_tracker_node',
@@ -40,6 +42,7 @@ def generate_launch_description():
                 'model_type': LaunchConfiguration('model_type'),
                 'display_ui': LaunchConfiguration('display_ui'),
                 'publish_annotated': LaunchConfiguration('publish_annotated'),
+                'presence_service': LaunchConfiguration('presence_service'),
                 # RealSense provider 从设备读内参，无需 intrinsics_path
             }],
         ),

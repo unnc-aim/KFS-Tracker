@@ -9,7 +9,8 @@ kfs_tracker_node:
     display_ui: false            # true: 本地 cv::imshow（headless 部署保持 false）
     publish_annotated: true      # true: 发布标注图到 annotated_topic
     frame_id: "kfs_camera"
-    # model / classifier_model 留空则自动用 share/model 下默认模型
+    presence_service: "/kfs_tracker/check_presence"
+    # model / classifier_model / presence_model 留空则自动用 share/model 下默认模型
 
     # ---- topic 输入模式 ----
     image_topic: "/camera/color/image_raw"

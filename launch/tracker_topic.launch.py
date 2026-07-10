@@ -37,6 +37,8 @@ def generate_launch_description():
                               description='true: 本地 cv::imshow 显示标注图'),
         DeclareLaunchArgument('publish_annotated', default_value='true',
                               description='true: 发布标注图到 /kfs_tracker/annotated_image'),
+        DeclareLaunchArgument('presence_service', default_value='/kfs_tracker/check_presence',
+                              description='KFS 近点存在性检测 service 名'),
         Node(
             package='kfs_tracker',
             executable='kfs_tracker_node',
@@ -47,6 +49,17 @@ def generate_launch_description():
                 os.path.join(
                     get_package_share_directory('kfs_tracker'),
                     'config', 'kfs_tracker_params.yaml'),
+                {
+                    'image_topic': LaunchConfiguration('image_topic'),
+                    'camera_info_topic': LaunchConfiguration('camera_info_topic'),
+                    'depth_topic': LaunchConfiguration('depth_topic'),
+                    'use_compressed': LaunchConfiguration('use_compressed'),
+                    'use_depth': LaunchConfiguration('use_depth'),
+                    'model_type': LaunchConfiguration('model_type'),
+                    'display_ui': LaunchConfiguration('display_ui'),
+                    'publish_annotated': LaunchConfiguration('publish_annotated'),
+                    'presence_service': LaunchConfiguration('presence_service'),
+                },
             ],
         ),
     ])

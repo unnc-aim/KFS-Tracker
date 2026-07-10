@@ -288,13 +288,69 @@ source install/setup.bash
 
 `KFSDetection` 字段：`header` / `valid` / `model_type`（heatmap\|bbox）/ `corners[4]` / `bbox_min`·`bbox_max` / `class_id`·`class_name`·`class_score`·`class_valid` / `infer_ms` / `center_distance_m`（-1.0=无深度）。
 
+### KFS 近点存在性 Service
+
+节点额外提供一个按需调用的 service：`/kfs_tracker/check_presence`，类型为 `kfs_tracker/srv/CheckKFSPresence`。它用于判断当前相机画面中是否存在“足够近”的 KFS 方块。
+
+原理：
+1. service 调用时读取节点缓存的最新一帧彩色图、深度图和相机内参。
+2. 使用 `corner_heatmap_localizer.pt` 对彩色图做角点热力图追踪，得到 KFS 平面 4 个角点。
+3. 使用 `PlaneTracker2D::detectFromCorners` 根据角点和相机内参计算位姿，并得到重投影误差。
+4. 如果重投影误差无效或大于阈值，认为角点/位姿不可靠，返回 `has_kfs_cube=false`。
+5. 如果重投影误差合格，则在角点四边形内部统计 16UC1 深度图的有效深度均值。
+6. 平均距离落在 `kfs_presence_detector.cpp` 顶部的近点距离区间内时返回 `true`，否则返回 `false`。
+
+> 近点距离区间目前写在 `src/kfs_presence_detector.cpp` 顶部：`kNearestPointMinDistanceM` / `kNearestPointMaxDistanceM`，后续按实测距离直接改这两个常量。
+
+调用方法：
+
+```bash
+# 先确保节点已经启动，并且已有图像输入。
+# topic + RGB-D 路径示例：
+ros2 launch kfs_tracker tracker_topic.launch.py use_depth:=true
+
+# 查看 service 类型
+ros2 service type /kfs_tracker/check_presence
+
+# 调用存在性判断（请求为空）
+ros2 service call /kfs_tracker/check_presence kfs_tracker/srv/CheckKFSPresence "{}"
+```
+
+返回字段：
+
+| 字段 | 说明 |
+|------|------|
+| `has_kfs_cube` | 最终判断结果：是否存在满足重投影和近点距离条件的 KFS 方块 |
+| `frame_available` | 节点是否已经收到至少一帧图像 |
+| `heatmap_valid` | 热力图角点追踪是否有效 |
+| `pose_solved` | `PlaneTracker2D` 是否得到低误差位姿 |
+| `depth_valid` | 追踪平面内是否有可用深度样本 |
+| `reprojection_error` | 角点位姿重投影误差，单位 px；`-1` 表示不可用 |
+| `average_plane_distance_m` | 追踪四边形内部有效深度均值，单位 m；`-1` 表示不可用 |
+| `valid_depth_samples` | 参与平均距离计算的有效深度像素数 |
+| `message` | 对当前判断路径的文字说明 |
+
+示例返回：
+
+```yaml
+has_kfs_cube: true
+frame_available: true
+heatmap_valid: true
+pose_solved: true
+depth_valid: true
+reprojection_error: 3.42
+average_plane_distance_m: 0.84
+valid_depth_samples: 12540
+message: kfs cube present
+```
+
 ### 节点参数
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `input_source` | `topic` | `local`（本地直连）\| `topic`（订阅 ROS 图像） |
 | `model_type` | `heatmap` | `heatmap`（角点）\| `bbox` |
-| `model` / `classifier_model` | share 下默认 | 模型路径，留空用 `share/kfs_tracker/model/*.pt` |
+| `model` / `classifier_model` / `presence_model` | share 下默认 | 模型路径，`presence_model` 固定用于 service 的热力图角点追踪 |
 | `input_size` | `300` | 模型输入尺寸 |
 | `display_ui` | `false` | `true` 时本地 `cv::imshow`（关闭 UI 渲染则保持 `false`，headless 必须关） |
 | `publish_annotated` | `true` | 是否发布标注图话题 |
@@ -307,6 +363,7 @@ source install/setup.bash
 | `camera_index` / `video_path` / `intrinsics_path` | — | local 模式参数 |
 | `frame_width` / `frame_height` / `grab_fps` | 1280 / 720 / 30.0 | local 模式采集 |
 | `detection_topic` / `annotated_topic` | 见上 | 输出话题名（绝对名） |
+| `presence_service` | `/kfs_tracker/check_presence` | KFS 近点存在性判断 service 名 |
 
 ### Launch 文件速查
 
@@ -372,8 +429,10 @@ ros2 launch kfs_tracker tracker_realsense.launch.py
 
 ```bash
 ros2 interface show kfs_tracker/msg/KFSDetection     # 查看消息字段
+ros2 interface show kfs_tracker/srv/CheckKFSPresence # 查看 service 字段
 ros2 topic echo /kfs_tracker/detection               # 观察检测结果
 ros2 topic hz /kfs_tracker/detection                 # 推理吞吐
+ros2 service call /kfs_tracker/check_presence kfs_tracker/srv/CheckKFSPresence "{}"
 rqt_image_view /kfs_tracker/annotated_image          # 观察标注图
 
 # ABI 健康检查：应只链到一份 OpenCV

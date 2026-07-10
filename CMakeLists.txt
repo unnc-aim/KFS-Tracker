@@ -44,6 +44,7 @@ endif()
 # ==================== 自定义消息 ====================
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/KFSDetection.msg"
+  "srv/CheckKFSPresence.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
@@ -58,6 +59,7 @@ set(KFS_CORE_SOURCES
   src/bbox_tracking_classify.cpp
   src/heatmap_classifier_infer.cpp
   src/heatmap_tracking_classify.cpp
+  src/kfs_presence_detector.cpp
   src/camera_provider.cpp
   src/camera_provider_opencv.cpp
   src/infer_pipeline.cpp
@@ -127,8 +129,8 @@ ament_target_dependencies(kfs_tracker_node
 rosidl_get_typesupport_target(kfs_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(kfs_tracker_node ${kfs_typesupport_target})
-# 确保自定义消息先生成再编译节点
-add_dependencies(kfs_tracker_node ${PROJECT_NAME}__rosidl_generator_c)
+# 确保自定义 msg/srv C++ 头先生成再编译节点
+add_dependencies(kfs_tracker_node ${PROJECT_NAME}__rosidl_generator_cpp)
 
 # ==================== 安装 ====================
 install(TARGETS kfs_tracker_cli kfs_tracker_node

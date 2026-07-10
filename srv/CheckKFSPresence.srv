@@ -1,0 +1,10 @@
+---
+bool has_kfs_cube
+bool frame_available
+bool heatmap_valid
+bool pose_solved
+bool depth_valid
+float64 reprojection_error
+float64 average_plane_distance_m
+int32 valid_depth_samples
+string message
